@@ -9,7 +9,10 @@ import { createAccessPolicy, createAccessPolicyScope } from '../../../src/channe
 import { evaluateInboundAccess } from '../../../src/channels/shared/inbound-access.mjs';
 
 for (const channel of ['feishu', 'qq']) {
-  test(`${channel} opens new bot messages and commands while preserving saved policies and legacy migration`, async (t) => {
+  // Seeds a new bot through the real createRuntime path and checks that saved
+  // policies survive. True v1 (no `accessPolicies` section) backfill is covered
+  // by test/channels/qq/access-policy-default.test.mjs.
+  test(`${channel} seeds new bot defaults while preserving saved policies and legacy migration`, async (t) => {
     const dataDir = await mkdtemp(join(tmpdir(), `dsh-new-access-${channel}-`));
     t.after(() => rm(dataDir, { recursive: true, force: true }));
     const path = join(dataDir, 'workspaces.json');
@@ -87,23 +90,41 @@ for (const channel of ['feishu', 'qq']) {
     bots.push(freshBot);
     const fresh = await connect(freshBot);
     const freshPolicy = fresh.getSettings();
-    for (const conversationType of ['direct', 'group']) {
-      assert.equal(freshPolicy[conversationType].mode, 'open');
-      assert.deepEqual(checkAccess(fresh, conversationType, 'other', 'hello'),
+    // The direct scope stays open for both channels; QQ now closes its group
+    // scope by default while Feishu keeps opening both scopes.
+    assert.equal(freshPolicy.direct.mode, 'open');
+    assert.equal(freshPolicy.direct.open.defaultCanExecuteCommands, true);
+    assert.deepEqual(checkAccess(fresh, 'direct', 'other', 'hello'),
+      { allowed: true, reason: 'allowed' });
+    assert.deepEqual(checkAccess(fresh, 'direct', 'other', '/status'),
+      { allowed: true, reason: 'allowed' });
+    assert.deepEqual(checkAccess(fresh, 'direct', 'owner', '/status'),
+      { allowed: true, reason: 'privileged-sender' });
+    if (channel === 'qq') {
+      assert.equal(freshPolicy.group.mode, 'allowlist');
+      assert.deepEqual(freshPolicy.group.allowlist.users, []);
+      assert.deepEqual(checkAccess(fresh, 'group', 'other', 'hello'),
+        { allowed: false, reason: 'sender-not-allowed' });
+      assert.deepEqual(checkAccess(fresh, 'group', 'other', '/status'),
+        { allowed: false, reason: 'sender-not-allowed' });
+      assert.deepEqual(checkAccess(fresh, 'group', 'owner', '/status'),
+        { allowed: true, reason: 'privileged-sender' });
+    } else {
+      assert.equal(freshPolicy.group.mode, 'open');
+      assert.equal(freshPolicy.group.open.defaultCanExecuteCommands, true);
+      assert.deepEqual(checkAccess(fresh, 'group', 'other', 'hello'),
         { allowed: true, reason: 'allowed' });
-      assert.equal(freshPolicy[conversationType].open.defaultCanExecuteCommands, true);
-      assert.deepEqual(checkAccess(fresh, conversationType, 'other', '/status'),
+      assert.deepEqual(checkAccess(fresh, 'group', 'other', '/status'),
         { allowed: true, reason: 'allowed' });
-      assert.deepEqual(checkAccess(fresh, conversationType, 'owner', '/status'),
+      assert.deepEqual(checkAccess(fresh, 'group', 'owner', '/status'),
         { allowed: true, reason: 'privileged-sender' });
     }
 
     const manualBot = bot('manual', '*');
     bots.push(manualBot);
     const manual = await connect(manualBot);
-    for (const conversationType of ['direct', 'group']) {
-      assert.equal(checkAccess(manual, conversationType, 'other', '/status').allowed, true);
-    }
+    assert.equal(checkAccess(manual, 'direct', 'other', '/status').allowed, true);
+    assert.equal(checkAccess(manual, 'group', 'other', '/status').allowed, channel !== 'qq');
 
     const customizedBot = bot('customized');
     bots.push(customizedBot);

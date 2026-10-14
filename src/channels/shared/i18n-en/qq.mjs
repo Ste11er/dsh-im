@@ -94,4 +94,6 @@ export default {
   'QQ 连接当前离线': 'The QQ connection is currently offline',
   'QQ 已授权，但无法安全保存接入配置。':
     'QQ authorization succeeded, but the connection configuration could not be saved safely.',
+  'QQ 机器人已暂停，已跳过主动投递。':
+    'The QQ bot is paused, so proactive delivery was skipped.',
 };

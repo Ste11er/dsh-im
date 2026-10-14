@@ -10,6 +10,25 @@ export function deferredOutcomeText(outcome) {
   return t('后台任务已结束（{reason}），没有可推送的最终结果。', { reason });
 }
 
+export const DEFERRED_NOT_ATTEMPTED = 'deferred-not-attempted';
+
+/**
+ * Marker for a local gate (e.g. a paused account) that declined to attempt a
+ * deferred delivery. `deliver` throws this, and the coordinator keeps the row
+ * pending without consuming an attempt.
+ *
+ * Deliberately distinct from the two existing failure outcomes:
+ * - `deliveryOutcome: 'unknown'` means the platform may already have accepted
+ *   the message (never retry a possible copy);
+ * - `deliveryOutcome: 'failed'` means a local attempt was made and failed.
+ * Neither is true when nothing was sent, so attempts must not move.
+ */
+export function deferredNotAttempted(message) {
+  const error = new Error(message ?? 'Deferred delivery was not attempted');
+  error.code = DEFERRED_NOT_ATTEMPTED;
+  return error;
+}
+
 function orderedEvents(history) {
   return (Array.isArray(history?.events) ? history.events : [])
     .map((row) => row?.event ?? row)
@@ -155,6 +174,12 @@ export function createDeferredDeliveryCoordinator({
       return 'delivered';
     } catch (error) {
       if (activeSignal.aborted) return 'none';
+      if (error?.code === DEFERRED_NOT_ATTEMPTED) {
+        // A local gate (paused account) stopped the delivery before any
+        // attempt: keep the row pending with its attempts intact. Do not
+        // reschedule — `resume()` re-drives frozen rows when the gate reopens.
+        return stopping ? 'unavailable' : 'waiting';
+      }
       if (error?.code === 'session-not-found') { await remove(entry); return 'none'; }
       const current = await pending(id);
       if (!current) return 'none';

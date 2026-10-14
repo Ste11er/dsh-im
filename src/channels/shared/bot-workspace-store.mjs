@@ -333,6 +333,11 @@ function normalizeDocument(value) {
     accessPolicies,
     aliases,
     busyMessageModes,
+    // Read-only: the shape of the document as loaded. A v1 file without an
+    // accessPolicies section predates persisted policies, so its bots must be
+    // backfilled with the legacy seed. Never serialize this marker, and never
+    // recompute it after a write.
+    legacyAccessPolicyDocument: value.accessPolicies === undefined,
   };
 }
 
@@ -415,6 +420,10 @@ export class BotWorkspaceStore {
   #contextEnhancement = {};
   #deliveryTargets = Object.create(null);
   #accessPolicies = Object.create(null);
+  // Frozen at load(): whether the loaded document lacks an accessPolicies
+  // section. Writes must not flip it, otherwise only the first of N existing
+  // bots would be seeded with the legacy default.
+  #legacyAccessPolicyDocument = false;
   #conversationWorkspaces = Object.create(null);
   #generations = new Map();
   #nextGeneration = 1;
@@ -448,6 +457,7 @@ export class BotWorkspaceStore {
       this.#deliveryTargets = normalized.deliveryTargets;
       this.#accessPolicies = normalized.accessPolicies;
       this.#conversationWorkspaces = normalized.conversationWorkspaces;
+      this.#legacyAccessPolicyDocument = normalized.legacyAccessPolicyDocument;
     } catch (error) {
       if (error?.code !== 'ENOENT') throw withConfigResource(error, 'workspace-config');
       this.#version = 1;
@@ -460,6 +470,8 @@ export class BotWorkspaceStore {
       this.#deliveryTargets = Object.create(null);
       this.#accessPolicies = Object.create(null);
       this.#conversationWorkspaces = Object.create(null);
+      // A brand-new installation is a modern document: new defaults apply.
+      this.#legacyAccessPolicyDocument = false;
     }
     this.#generations.clear();
     this.#nextGeneration = 1;
@@ -706,15 +718,23 @@ export class BotWorkspaceStore {
     workspace = this.#defaultWorkspace,
     defaultAgentPreset,
     initialAccessPolicy,
+    legacyInitialAccessPolicy,
   } = {}) {
     const id = botIdOf(botId);
     const initialWorkspace = resolve(workspace);
     return this.#enqueue(id, async () => {
       const createsBot = !this.#workspaces[id];
-      const initializesAccessPolicy = initialAccessPolicy !== undefined
+      // A document loaded without an accessPolicies section predates the
+      // feature: backfill its bots with the legacy seed so upgrading does not
+      // change their behavior. The marker is fixed at load time, so every bot
+      // in the same batch sees the same choice.
+      const seedPolicy = this.#legacyAccessPolicyDocument && legacyInitialAccessPolicy !== undefined
+        ? legacyInitialAccessPolicy
+        : initialAccessPolicy;
+      const initializesAccessPolicy = seedPolicy !== undefined
         && !Object.hasOwn(this.#accessPolicies, id);
       const accessPolicy = initializesAccessPolicy
-        ? validateAccessPolicy(initialAccessPolicy)
+        ? validateAccessPolicy(seedPolicy)
         : undefined;
       const agentPreset = createsBot ? validateAgentPresetId(defaultAgentPreset) : null;
       // Resolve saved bot/conversation choices before preparing the shared IM

@@ -16,6 +16,13 @@ import { SET_AGENT_PRESET_ENDPOINT, validAgentPresetPayload } from '../shared/ag
 import { SET_MODEL_ENDPOINT, validModelPayload } from '../shared/model-setting-rpc.mjs';
 
 export const QQ_RPC_CHANNEL = '/qq';
+
+/**
+ * Account-level persistent pause (WG-QQ-03). The endpoint carries only a
+ * boolean; the response is the ordinary redacted bot snapshot.
+ */
+export const SET_ACCOUNT_PAUSE_ENDPOINT = 'bot.account-pause.set';
+
 export const QQ_ENDPOINTS = Object.freeze({
   status: 'connection.status',
   beginProvisioning: 'provision.begin',
@@ -31,6 +38,7 @@ export const QQ_ENDPOINTS = Object.freeze({
   setBusyMessageMode: SET_MESSAGE_MODE_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
   setAlias: SET_ALIAS_ENDPOINT,
+  setAccountPause: SET_ACCOUNT_PAUSE_ENDPOINT,
 });
 export const QQ_RPC_ENDPOINTS = Object.freeze(Object.values(QQ_ENDPOINTS));
 
@@ -52,6 +60,12 @@ function validId(value) {
 
 function validCredential(value, maxLength) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= maxLength;
+}
+
+function validAccountPausePayload(payload) {
+  return exactKeys(payload, ['botId', 'paused'])
+    && validId(payload.botId)
+    && typeof payload.paused === 'boolean';
 }
 
 function payloadFailure(endpoint, payload) {
@@ -107,6 +121,10 @@ function payloadFailure(endpoint, payload) {
   if (endpoint === QQ_ENDPOINTS.setAlias) {
     return validAliasPayload(payload)
       ? null : '请输入有效的别名（最多 80 个字符）。';
+  }
+  if (endpoint === QQ_ENDPOINTS.setAccountPause) {
+    return validAccountPausePayload(payload)
+      ? null : 'bot.account-pause.set requires a botId and a boolean paused.';
   }
   return 'Unknown QQ endpoint.';
 }
@@ -234,6 +252,12 @@ export function createQqRpcHandler(controller, { encodeQr = qrDataUrl } = {}) {
         if (typeof controller.updateAgentPreset !== 'function') throw new Error('Agent preset update is unavailable');
         value = await publicStatus(
           await controller.updateAgentPreset(payload.botId, payload.agentPreset),
+          cachedEncode,
+        );
+      } else if (endpoint === QQ_ENDPOINTS.setAccountPause) {
+        if (typeof controller.setPaused !== 'function') throw new Error('Account pause update is unavailable');
+        value = await publicStatus(
+          await controller.setPaused(payload.botId, payload.paused),
           cachedEncode,
         );
       } else {

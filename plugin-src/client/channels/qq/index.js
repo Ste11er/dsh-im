@@ -168,6 +168,21 @@ function RemoveConfirmation({ account, busy, onConfirm, onCancel }) {
       h(Button, { kind: 'danger', onClick: onConfirm, disabled: busy }, busy ? '正在移除…' : '确认移除接入')));
 }
 
+function AccountPauseToggle({ paused, disabled, onChange }) {
+  return h('label', { className: 'dqq-pause' },
+    h('input', {
+      type: 'checkbox',
+      className: 'dqq-pauseInput',
+      checked: paused,
+      disabled: Boolean(disabled),
+      onChange: (event) => onChange(event.target.checked),
+    }),
+    h('span', null, paused
+      ? '已暂停发送：主动投递与后台补发被拦，被动回复照常'
+      : '暂停发送：拦截主动投递与后台补发，不影响被动回复'),
+  );
+}
+
 export function AccountCard({
   account,
   busy,
@@ -179,6 +194,7 @@ export function AccountCard({
   onModelSave,
   onAgentPresetSave,
   onContextEnhancementSave,
+  onPauseChange,
   onRequestRemove,
   onConfirmRemove,
   onCancelRemove,
@@ -237,6 +253,11 @@ export function AccountCard({
         config: account.contextEnhancement,
         disabled: Boolean(busy),
         onSave: onContextEnhancementSave,
+      }),
+      h(AccountPauseToggle, {
+        paused: account.paused === true,
+        disabled: Boolean(busy),
+        onChange: onPauseChange,
       }),
       h('div', { className: 'ddt-accountFooter dim-cardFooter' },
         h('div', { className: 'dim-cardFooterLayout' },
@@ -542,6 +563,12 @@ export function QqSettingsTab({ rpcCall }) {
               'context-enhancement',
               QQ_ENDPOINTS.setContextEnhancement,
               { botId: account.botId, config },
+            ),
+            onPauseChange: (paused) => botAction(
+              account,
+              'pause',
+              QQ_ENDPOINTS.setAccountPause,
+              { botId: account.botId, paused },
             ),
             onRequestRemove: () => setRemoveTarget(account.botId),
             onCancelRemove: () => setRemoveTarget(null),

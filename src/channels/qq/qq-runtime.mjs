@@ -37,6 +37,7 @@ export class QqRuntime {
   #state;
   #contextEnhancement;
   #accessPolicy;
+  #paused;
   #logger;
   #diagnostics;
   #replyTimeoutMs;
@@ -57,6 +58,7 @@ export class QqRuntime {
     state,
     contextEnhancement,
     accessPolicy,
+    paused,
     logger = console,
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 20_000,
@@ -72,6 +74,9 @@ export class QqRuntime {
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
+    // WG-QQ-03: default OFF. The persisted record is the durable truth, an
+    // explicit option (or config.paused) seeds the live gate at start.
+    this.#paused = (paused ?? config.paused) === true;
     this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'qq', logger });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
@@ -113,6 +118,19 @@ export class QqRuntime {
       key: options.key, actor, validate: options.validate,
       send: (text) => this.sendProactiveText(target, text),
     }, options);
+  }
+
+  /**
+   * WG-QQ-03 live toggle. L3 is gated at the controller (the delivery-adapter
+   * entry); this flag drives the bridge's L4 background re-delivery gate. The
+   * method below stays ungated on purpose: approval prompts reuse it as their
+   * L2 send path.
+   */
+  setPaused(value) {
+    const paused = value === true;
+    this.#paused = paused;
+    this.#bridge?.setPaused(paused);
+    return { paused };
   }
 
   async sendProactiveText(target, text, { signal, format = 'plain' } = {}) {
@@ -192,6 +210,7 @@ export class QqRuntime {
       state: this.#state,
       contextEnhancement: this.#contextEnhancement,
       accessPolicy: this.#accessPolicy,
+      paused: this.#paused,
       status: this.#status,
       logger: this.#logger,
       replyTimeoutMs: this.#replyTimeoutMs,

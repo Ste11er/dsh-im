@@ -25,6 +25,7 @@ export const QQ_ENDPOINTS = Object.freeze({
   setBusyMessageMode: 'bot.message-mode.set',
   setAccessPolicy: 'bot.access-policy.set',
   setAlias: 'bot.alias.set',
+  setAccountPause: 'bot.account-pause.set',
 });
 
 const PROVISION_STATES = new Set(['starting', 'pending', 'refreshing', 'connecting', 'connected', 'failed', 'cancelled']);
@@ -99,6 +100,9 @@ function normalizeBot(value) {
     botId: id(value.botId),
     connected,
     state: connected ? 'connected' : state,
+    // Account-level pause (WG-QQ-03). Default OFF: only an explicit true means
+    // the account is paused, so an absent field never reads as paused.
+    paused: value.paused === true,
     workspace: text(value.workspace, '', 4_096),
     model: normalizeModelSelection(value.model),
     agentPreset: normalizeAgentPresetId(value.agentPreset),

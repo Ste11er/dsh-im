@@ -23,6 +23,17 @@ function connectionError(error, message) {
   return publicQqStateError(error) ?? safeError('connection-failed', message);
 }
 
+/**
+ * L3 gate error: the account is paused, so proactive delivery is dropped
+ * locally without any attempt. Deliberately carries no `deliveryOutcome` —
+ * the platform never saw the message, which is not the same as 'unknown'.
+ */
+function accountPausedError() {
+  const error = new Error(t('QQ 机器人已暂停，已跳过主动投递。'));
+  error.code = 'account-paused';
+  return error;
+}
+
 function publicAttempt(record) {
   if (!record) return null;
   return {
@@ -212,6 +223,8 @@ export class QqController {
         ownerUserOpenid: previousConfig?.ownerUserOpenid ?? '*',
         createdAt: previousConfig?.createdAt ?? new Date().toISOString(),
         connectedAt: new Date().toISOString(),
+        // Rebinding credentials never silently resumes a paused account.
+        ...(previousConfig?.paused === true ? { paused: true } : {}),
       };
       await atConnectionStage('credential.save', () => this.#credentials.set(identity.secretRef, normalizedSecret), 'credential-store');
       try {
@@ -287,6 +300,10 @@ export class QqController {
     const config = this.#configStore.get(botId);
     if (!config) throw new Error('Unknown QQ bot');
     return this.#withBotTransition(botId, async () => {
+      // L3: an account pause blocks proactive delivery locally. Passive
+      // replies, command receipts, approval prompts and connection tests do
+      // not pass through here, so they keep working while paused.
+      if (this.#configStore.get(botId)?.paused === true) throw accountPausedError();
       const runtime = this.#runtimes.get(botId);
       if (!runtime?.status?.ready || typeof runtime.sendProactiveText !== 'function') {
         const error = new Error(t('QQ机器人尚未连接'));
@@ -294,6 +311,27 @@ export class QqController {
         throw error;
       }
       return runtime.sendProactiveText(target, text, options);
+    });
+  }
+
+  /**
+   * Persist the account-level pause (WG-QQ-03) and apply it to the live
+   * runtime without restarting the connection. Resuming is always an explicit
+   * caller action; nothing here clears the flag implicitly.
+   */
+  async setPaused(botId, value) {
+    const paused = value === true;
+    if (!this.#configStore.get(botId)) throw new Error('Unknown QQ bot');
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      const next = { ...current };
+      if (paused) next.paused = true;
+      else delete next.paused;
+      await atConnectionStage('account.save', () => this.#configStore.save(next), 'account-config');
+      this.#runtimes.get(botId)?.setPaused?.(paused);
+      this.#touch();
+      return this.status();
     });
   }
 
@@ -355,6 +393,8 @@ export class QqController {
         state,
         connected,
         configured: true,
+        // Default OFF: only an explicit persisted true pauses the account.
+        paused: config.paused === true,
         bot: { name: t('QQ机器人'), appIdMasked: maskQqAppId(config.appId) },
         health: {
           status: connected ? 'healthy' : state === 'error' ? 'error' : 'offline',
@@ -439,6 +479,8 @@ export class QqController {
       ownerUserOpenid,
       createdAt: previousConfig?.createdAt ?? new Date().toISOString(),
       connectedAt: new Date().toISOString(),
+      // A rescan keeps the existing pause decision; resuming stays explicit.
+      ...(previousConfig?.paused === true ? { paused: true } : {}),
     };
     return this.#withBotTransition(identity.botId, async () => {
       await atConnectionStage('credential.save', () => this.#credentials.set(identity.secretRef, appSecret), 'credential-store');

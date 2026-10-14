@@ -67,6 +67,10 @@ export async function createProductionController(ctx, config = {}, internals = {
   await Promise.all(configuredBots.map((bot) => workspaces.ensure(bot.botId, {
     defaultAgentPreset: config.agentPreset,
     initialAccessPolicy: initialAccessPolicyFor('qq', bot),
+    // Documents written before access policies existed keep the previous group
+    // default, so tightening the new-bot default cannot close groups that are
+    // already in use. Modern documents seed with the tightened default.
+    legacyInitialAccessPolicy: initialAccessPolicyFor('qq', bot, { legacy: true }),
   })));
   const observedConfigStore = typeof configStore.remove === 'function'
     ? observeBotWorkspaceRemovals(configStore, { workspaces })

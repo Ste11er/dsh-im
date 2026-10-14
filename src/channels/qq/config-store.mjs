@@ -52,6 +52,10 @@ function normalizeBot(value) {
     ownerUserOpenid,
     createdAt: cleanString(value.createdAt) ?? new Date().toISOString(),
     connectedAt: cleanString(value.connectedAt),
+    // Account-level pause (WG-QQ-03). Only an explicit true is persisted:
+    // an absent field means paused=false, so untouched bot records keep the
+    // exact document shape they had before this feature existed.
+    ...(value.paused === true ? { paused: true } : {}),
   });
 }
 

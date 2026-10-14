@@ -44,8 +44,11 @@ function whatsappNumberJids(values) {
 /**
  * Build the one-time, backwards-compatible seed for a bot whose workspace
  * document does not yet contain an access policy.
+ *
+ * `legacy: true` selects the defaults that predate WG-QQ-01, used only when the
+ * loaded workspace document has no accessPolicies section at all.
  */
-export function initialAccessPolicyFor(channel, config = {}) {
+export function initialAccessPolicyFor(channel, config = {}, { legacy = false } = {}) {
   const key = String(channel ?? '').trim().toLowerCase();
   if (key === 'weixin') {
     return createAccessPolicy({
@@ -62,7 +65,7 @@ export function initialAccessPolicyFor(channel, config = {}) {
     const owners = cleanIds(config.ownerUserOpenid);
     return createAccessPolicy({
       direct: owners.includes('*') ? openScope() : allowlistScope(),
-      group: openScope(),
+      group: legacy ? openScope() : allowlistScope(),
     });
   }
   if (key === 'telegram') {
@@ -99,13 +102,17 @@ export function initialAccessPolicyFor(channel, config = {}) {
 
 /**
  * Seed newly connected bots after startup has migrated existing bots with
- * initialAccessPolicyFor(). Open Feishu/QQ messages and commands in both chat
- * types; workspace ensure() preserves any policy already saved.
+ * initialAccessPolicyFor(). Open Feishu messages and commands in both chat
+ * types. QQ keeps direct messages open but closes groups by default
+ * (WG-QQ-01); workspace ensure() preserves any policy already saved.
  */
 export function newBotAccessPolicyFor(channel, config = {}) {
   const key = String(channel ?? '').trim().toLowerCase();
-  if (key === 'feishu' || key === 'qq') {
+  if (key === 'feishu') {
     return createAccessPolicy({ direct: openScope(), group: openScope() });
+  }
+  if (key === 'qq') {
+    return createAccessPolicy({ direct: openScope(), group: allowlistScope() });
   }
   return initialAccessPolicyFor(channel, config);
 }

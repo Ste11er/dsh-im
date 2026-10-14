@@ -108,6 +108,8 @@ const EN = Object.freeze({
   '填写 member_openid': 'Enter member_openid',
   'QQ User Open ID': 'QQ User Open ID',
   '群成员 User ID': 'Group member User ID',
+  '暂停发送：拦截主动投递与后台补发，不影响被动回复': 'Pause sending: block proactive delivery and background re-delivery while passive replies keep working',
+  '已暂停发送：主动投递与后台补发被拦，被动回复照常': 'Sending paused: proactive delivery and background re-delivery are blocked; passive replies still work',
   '填写数字 User ID': 'Enter a numeric user ID',
   'WhatsApp 电话号码或 JID': 'WhatsApp phone number or JID',
   '群成员电话号码或 JID': 'Group member phone number or JID',

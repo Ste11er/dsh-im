@@ -58,8 +58,15 @@ test('Host initialization preserves the nine channel access baselines and legacy
     assert.deepEqual(initialAccessPolicyFor(channel), policy());
   }
   assert.deepEqual(initialAccessPolicyFor('qq', { ownerUserOpenid: 'qq-owner' }),
+    policy(allowlist(), allowlist()));
+  assert.deepEqual(initialAccessPolicyFor('qq', { ownerUserOpenid: '*' }),
+    policy(open(), allowlist()));
+  // Legacy QQ documents (no accessPolicies section) keep the previous group
+  // default, so an upgrade does not silently close groups already in use.
+  assert.deepEqual(initialAccessPolicyFor('qq', { ownerUserOpenid: 'qq-owner' }, { legacy: true }),
     policy(allowlist(), open()));
-  assert.deepEqual(initialAccessPolicyFor('qq', { ownerUserOpenid: '*' }), policy());
+  assert.deepEqual(initialAccessPolicyFor('qq', { ownerUserOpenid: '*' }, { legacy: true }),
+    policy());
   assert.deepEqual(initialAccessPolicyFor('telegram', {
     accessMode: 'compatible', allowedUsers: ['101'],
   }), policy(open(['101']), open()));
@@ -79,11 +86,13 @@ test('Host initialization preserves the nine channel access baselines and legacy
   }), policy(open(['16505550999@s.whatsapp.net']), open()));
 });
 
-test('new Feishu and QQ bots open messages and commands for QR and manual binding', () => {
+test('new Feishu bots stay open while new QQ bots close the group by default', () => {
   assert.deepEqual(newBotAccessPolicyFor('feishu', { ownerOpenIds: ['ou_owner'] }), policy());
-  assert.deepEqual(newBotAccessPolicyFor('qq', { ownerUserOpenid: 'qq-owner' }), policy());
+  assert.deepEqual(newBotAccessPolicyFor('qq', { ownerUserOpenid: 'qq-owner' }),
+    policy(open(), allowlist()));
   assert.deepEqual(newBotAccessPolicyFor('feishu', { ownerOpenIds: ['*'] }), policy());
-  assert.deepEqual(newBotAccessPolicyFor('qq', { ownerUserOpenid: '*' }), policy());
+  assert.deepEqual(newBotAccessPolicyFor('qq', { ownerUserOpenid: '*' }),
+    policy(open(), allowlist()));
   for (const channel of ['weixin', 'dingtalk', 'wecom', 'wecom-app', 'slack', 'telegram',
     'discord', 'whatsapp', 'imessage', 'matrix']) {
     assert.deepEqual(newBotAccessPolicyFor(channel), initialAccessPolicyFor(channel), channel);

@@ -1,6 +1,6 @@
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
-import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
+import { createDeferredDeliveryCoordinator, deferredNotAttempted, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
 import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
@@ -441,6 +441,7 @@ export class QqHarnessBridge {
   #deferred;
   #contextEnhancement;
   #accessPolicy;
+  #paused;
   #status;
   #logger;
   #replyTimeoutMs;
@@ -467,6 +468,7 @@ export class QqHarnessBridge {
     state,
     contextEnhancement,
     accessPolicy,
+    paused = false,
     status = createQqBridgeStatus(),
     logger = console,
     replyTimeoutMs = 600_000,
@@ -487,6 +489,7 @@ export class QqHarnessBridge {
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
+    this.#paused = paused === true;
     this.#status = status;
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
@@ -502,6 +505,23 @@ export class QqHarnessBridge {
 
   get status() {
     return structuredClone(this.#status);
+  }
+
+  /**
+   * WG-QQ-03 L4 gate. Pausing freezes background re-delivery: nothing is
+   * attempted, so frozen rows stay pending without consuming an attempt.
+   * Unpausing re-drives them immediately instead of waiting for the next poll.
+   */
+  setPaused(value) {
+    const paused = value === true;
+    if (this.#paused === paused) return paused;
+    this.#paused = paused;
+    if (!paused) {
+      void this.#deferred.resume().catch((error) => {
+        this.#logger?.warn?.('[dsh-im:qq] deferred delivery resume failed:', error?.message ?? String(error));
+      });
+    }
+    return paused;
   }
 
   accept(message) {
@@ -738,6 +758,11 @@ export class QqHarnessBridge {
   }
 
   async #deliverDeferredOutcome(entry, outcome) {
+    // L4: while paused the local attempt never happens. Signal the coordinator
+    // with the explicit "not attempted" outcome so the row keeps its attempts
+    // and stays pending — 'unknown' would claim the platform may have accepted
+    // a message that was never sent.
+    if (this.#paused) throw deferredNotAttempted('QQ account is paused');
     await sendMarkdownReply(this.#bot, entry.target, deferredOutcomeText(outcome), { logger: this.#logger });
     return true;
   }
