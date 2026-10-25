@@ -14,6 +14,13 @@ export function isQqMessageAddressed(message) {
     || selfMentions(message).length > 0);
 }
 
+/** Full-group delivery is data only; enabling it never changes mention rules. */
+export function isQqGroupContextMessage(message, enabled = false) {
+  return enabled === true && message?.kind === 'group'
+    && message.rawEventType === 'GROUP_MESSAGE_CREATE'
+    && !isQqMessageAddressed(message);
+}
+
 /** botIds belongs to one runtime; only platform-marked self mentions add IDs. */
 export function normalizeQqMentions(message, botIds = new Set()) {
   if (message?.kind !== 'group') return message;
