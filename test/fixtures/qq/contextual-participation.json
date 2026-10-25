@@ -1,0 +1,8 @@
+[
+  {"name":"noun-phrase-answers-bot-question","background":[{"role":"assistant","senderId":"self","text":"我可以解释图中的公式 x + 1 = 3，也可以讲配色。你想了解公式还是配色？"}],"current":"这张图里的公式","expected":"reply"},
+  {"name":"same-noun-phrase-still-in-progress","background":[{"senderId":"synthetic-speaker","text":"先别回，我把问题分几条发，等我说发完了再回答。"}],"current":"这张图里的公式","expected":"wait"},
+  {"name":"reason-answers-bot-question","background":[{"role":"assistant","senderId":"self","text":"你昨天为什么没买那个耳机？"}],"current":"因为太贵了","expected":"reply"},
+  {"name":"same-reason-with-promised-question","background":[{"senderId":"synthetic-speaker","text":"我分两条讲：第一条原因，第二条再说我的问题；先别打断，等我说发完了。"}],"current":"因为太贵了","expected":"wait"},
+  {"name":"explicitly-unfinished-condition","background":[{"senderId":"synthetic-speaker","text":"我先发条件，下一条补结论，现在还没说完，先别回。"}],"current":"如果把这个","expected":"wait"},
+  {"name":"complete-casual-chat","background":[],"current":"大肥鱼，今天终于下班了，给我发个躺平的表情包","expected":"reply"}
+]
