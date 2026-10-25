@@ -1,5 +1,6 @@
 import { installQqCapabilitiesContext } from './channels/qq/capabilities-context.mjs';
 import { installQqMemoryTool } from './channels/qq/memory-tool.mjs';
+import { installQqWebContext } from './channels/qq/web-context.mjs';
 import { installQqPersonaContext } from './channels/qq/persona-context.mjs';
 import { apply as applyDingtalk } from './channels/dingtalk/index.mjs';
 import { apply as applyDiscord } from './channels/discord/index.mjs';
@@ -156,6 +157,7 @@ export function createImHostPlugin(internals = {}) {
         installQqPersonaContext(artifactCtx);
         installQqCapabilitiesContext(artifactCtx);
         installQqMemoryTool(artifactCtx);
+        installQqWebContext(artifactCtx);
         installQqParticipationPolicy(artifactCtx);
       });
     } else {
@@ -164,6 +166,7 @@ export function createImHostPlugin(internals = {}) {
       installQqPersonaContext(ctx);
       installQqCapabilitiesContext(ctx);
       installQqMemoryTool(ctx);
+      installQqWebContext(ctx);
       installQqParticipationPolicy(ctx);
     }
     const logger = typeof ctx?.logger === 'function'

@@ -11,6 +11,7 @@ export function participationToolGuard(registry, exec) {
   if (!context?.autonomous || context.channel !== 'qq') return '自主接话工具缺少当前 QQ 回合授权。';
   if (exec.name === 'dsh_qq_memory' && typeof context.memoryLookup === 'function') return;
   if (exec.name === 'dsh_qq_sticker') return;
+  if (exec.name === 'web_search' || exec.name === 'web_fetch') return;
   if (exec.name === 'dsh_im_return_file' && selectedImages.get(context)?.has(exec.arguments?.path)) return;
-  return '自主参与群聊只允许表情检索与本轮已选表情回传，不执行操作任务。';
+  return '自主参与群聊只允许表情、本群记忆和公开网页检索，不执行本机操作任务。';
 }

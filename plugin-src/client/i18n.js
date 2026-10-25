@@ -17,7 +17,7 @@ const EN = Object.freeze({
   "默认冷却 180 秒，限制模型评估频率。按语义判断发言是否完整，未说完则保留同一人的片段等后文；不靠停顿触发。文字和图片都可判断，需开启短期群聊上下文。": "Default cooldown: 180 seconds, limiting assessment frequency. The model checks semantic completeness and retains unfinished speech by author for later input; pauses do not trigger replies. Text and images are supported. Requires recent group context.",
   "继续听：": "Waiting for more:",
   "接话判断返回格式无效，本次尚未调用 QQ 发送接口。": "The participation judgment returned an invalid format. No QQ send was attempted.",
-  "自主接话仅开放表情相关工具，不执行文件或命令操作；暂停发送、安静时段与发送预算仍生效。": "Autonomous replies only have sticker tools, without file or command operations. Sending pauses, quiet hours and budgets still apply.",
+  "自主接话可使用表情、本群记忆和联网检索工具，不执行本机文件或命令操作；暂停发送、安静时段与发送预算仍生效。": "Autonomous replies can use stickers, current-group memory and web tools, without local file or command operations. Sending pauses, quiet hours and budgets still apply.",
   "群聊上下文已关闭，自主参与暂停。": "Group context is off; autonomous participation is paused.",
   "候选：": "Candidates:",
   "保持安静：": "Kept silent:",

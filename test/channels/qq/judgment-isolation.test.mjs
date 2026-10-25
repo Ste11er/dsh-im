@@ -11,7 +11,7 @@ function fixture(output = '[[QQ_REPLY]]') {
     return { agent: { followup: input => { observed.input = input; }, cancel() {}, whenIdle: async () => {
       observed.assembly = await hooks.get('system-prompt/assemble')({}, {}, async () => ({
         sections: [{ name: 'host-chat-persona', text: 'UNRELATED_CHAT_ROLE' }],
-        contexts: [{ name: 'chat-style', text: 'UNRELATED_CHAT_CONTEXT' }], tools: [{ name: 'host_tool' }],
+        contexts: [{ name: 'chat-style', text: 'UNRELATED_CHAT_CONTEXT' }], tools: [{ name: 'host_tool' }, { name: 'web_search' }, { name: 'web_fetch' }],
       }));
     }, session: { snapshotEvents: () => [
       { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: output }] } } },
