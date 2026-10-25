@@ -61,6 +61,7 @@
     "scripts/verify-lan-management.mjs",
     "scripts/verify-model-setting.mjs",
     "scripts/verify-package.mjs",
+    "scripts/prefetch-qq-stickers.mjs",
     "scripts/verify-session-channel-logos.mjs",
     "scripts/verify-session-title-prefix.mjs",
     "src",
