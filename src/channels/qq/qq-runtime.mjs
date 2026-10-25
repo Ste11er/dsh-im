@@ -1,3 +1,6 @@
+import { qqGroupParticipation } from './group-participation.mjs';
+import { qqPersona } from './persona.mjs';
+import { qqStickersEnabled } from './sticker-config.mjs';
 import { extractConnectionEvidence, createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { QQBot, contentSanitizer, typingIndicator } from '@tencent-connect/qqbot-nodejs';
 
@@ -6,10 +9,17 @@ import {
   connectionTestTargetUnavailable,
 } from '../shared/connection-test.mjs';
 import { t } from '../shared/i18n.mjs';
+import { chunkMarkdownParts } from '../shared/markdown-chunks.mjs';
+import {
+  createDryRunRecorder, createQuietQueue, evaluateSendGate, isWithinQuietHours,
+  normalizeSendControl, recordSendUsage,
+} from '../shared/send-control.mjs';
 import { evaluateInboundAccess } from '../shared/inbound-access.mjs';
 import { createQqBridgeStatus, QqHarnessBridge } from './qq-bridge.mjs';
 import { isQqMessageAddressed, normalizeQqMentions } from './qq-mention.mjs';
 import { sendMarkdownReply } from './markdown-reply.mjs';
+import { qqGroupContextEnabled } from './group-context.mjs';
+import { qqGroupMemoryEnabled } from './group-memory-config.mjs';
 
 function timeoutError() {
   const error = new Error('QQ WebSocket did not become ready in time');
@@ -30,6 +40,14 @@ export function createQqRuntimeStatus() {
   };
 }
 
+/** Pure L3 decision helper: segment count comes from the real send path. */
+export function evaluateProactiveOutbound({
+  sendControl, usage, text, format = 'plain', now = Date.now(),
+}) {
+  const segments = format === 'markdown' ? chunkMarkdownParts(String(text ?? '')).length : 1;
+  return evaluateSendGate({ config: sendControl, usage, now, segments });
+}
+
 export class QqRuntime {
   #config;
   #appSecret;
@@ -38,6 +56,17 @@ export class QqRuntime {
   #contextEnhancement;
   #accessPolicy;
   #paused;
+  #sendControl;
+  #groupParticipation;
+  #participationReply;
+  #persona;
+  #stickersEnabled;
+  #groupContextEnabled;
+  #groupMemory;
+  #groupMemoryEnabled;
+  #dryRun = createDryRunRecorder();
+  #quietQueue = createQuietQueue();
+  #sendControlTimer = null;
   #logger;
   #diagnostics;
   #replyTimeoutMs;
@@ -59,6 +88,9 @@ export class QqRuntime {
     contextEnhancement,
     accessPolicy,
     paused,
+    sendControl,
+    participationReply = null,
+    groupMemory = null,
     logger = console,
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 20_000,
@@ -77,6 +109,17 @@ export class QqRuntime {
     // WG-QQ-03: default OFF. The persisted record is the durable truth, an
     // explicit option (or config.paused) seeds the live gate at start.
     this.#paused = (paused ?? config.paused) === true;
+    // WG-QQ-04/05/06: default OFF; the persisted bot record is the truth.
+    this.#sendControl = normalizeSendControl(sendControl ?? config.sendControl);
+    this.#groupParticipation = qqGroupParticipation(config.groupParticipation);
+    this.#participationReply = participationReply;
+    if (this.#groupParticipation.enabled && typeof participationReply !== 'function') throw new TypeError('Participation Agent unavailable');
+    this.#persona = qqPersona(config.persona);
+    this.#stickersEnabled = qqStickersEnabled(config.stickersEnabled);
+    this.#groupContextEnabled = qqGroupContextEnabled(config.groupContextEnabled);
+    this.#groupMemoryEnabled = qqGroupMemoryEnabled(config.groupMemoryEnabled);
+    this.#groupMemory = groupMemory;
+    if (this.#groupMemoryEnabled && !groupMemory) throw new TypeError('QQ long memory requires a store');
     this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'qq', logger });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
@@ -85,7 +128,9 @@ export class QqRuntime {
   }
 
   get status() {
-    return structuredClone(this.#status);
+    const memory = this.#groupMemory?.status ?? null;
+    return structuredClone({ ...this.#status, participationStats: this.#bridge?.participationStats ?? null, groupMemory: memory
+      ? { ...memory, lastError: this.#status.groupMemoryError ?? memory.lastError } : null });
   }
 
   async sendConnectionTest(text) {
@@ -133,6 +178,116 @@ export class QqRuntime {
     return { paused };
   }
 
+  /** WG-QQ-04/05/06 live configuration update; applies to L3 and L4 at once. */
+  setSendControl(value) {
+    this.#sendControl = normalizeSendControl(value);
+    this.#bridge?.setSendControl(this.#sendControl);
+    return this.#sendControl;
+  }
+
+  setGroupParticipation(value) {
+    const settings = qqGroupParticipation(value);
+    if (settings.enabled && typeof this.#participationReply !== 'function') throw new TypeError('Participation Agent unavailable');
+    this.#groupParticipation = settings;
+    this.#bridge?.setGroupParticipation(settings);
+  }
+
+  setPersona(value) {
+    this.#persona = qqPersona(value);
+    this.#bridge?.setPersona(this.#persona);
+  }
+
+  setStickersEnabled(value) {
+    this.#stickersEnabled = qqStickersEnabled(value);
+    this.#bridge?.setStickersEnabled(value);
+    return this.status;
+  }
+
+  setGroupContextEnabled(value) {
+    this.#groupContextEnabled = qqGroupContextEnabled(value);
+    this.#bridge?.setGroupContextEnabled(value);
+    this.#applyGroupMemory();
+    return value;
+  }
+
+  setGroupMemoryEnabled(value) {
+    const enabled = qqGroupMemoryEnabled(value);
+    if (!this.#groupMemory) throw new TypeError('QQ long memory store is unavailable');
+    this.#groupMemory.setEnabled(enabled && this.#groupContextEnabled, this.#abortController?.signal);
+    this.#groupMemoryEnabled = enabled;
+    this.#bridge?.setGroupMemory(enabled && this.#groupContextEnabled ? this.#groupMemory : null);
+    return value;
+  }
+
+  #applyGroupMemory() {
+    if (!this.#groupMemory) return;
+    const enabled = this.#groupMemoryEnabled && this.#groupContextEnabled;
+    this.#groupMemory.setEnabled(enabled, this.#abortController?.signal);
+    this.#bridge?.setGroupMemory(enabled ? this.#groupMemory : null);
+  }
+
+  compactGroupMemory() {
+    if (!this.#groupMemoryEnabled || !this.#groupContextEnabled) throw new Error('QQ long memory is disabled');
+    return this.#groupMemory.compact({ force: true });
+  }
+
+  /** In-memory dry-run candidates for L3 attempts (WG-QQ-06). */
+  dryRunCandidates() {
+    return [...this.#dryRun.list(), ...(this.#bridge?.dryRunCandidates?.() ?? [])];
+  }
+
+  /** Diagnostics for the outbound gate (counts only, no message content). */
+  sendControlDiagnostics() {
+    return {
+      dryRunCandidates: this.dryRunCandidates().length,
+      quietQueued: this.#quietQueue.stats().keys,
+      quietDropped: this.#quietQueue.stats(),
+    };
+  }
+
+  /** Flush quiet-hours deferrals now (used by the timer and by operators). */
+  async flushSendControlNow() {
+    await this.#flushSendControl();
+  }
+
+  #startSendControlTimer() {
+    if (this.#sendControlTimer) return;
+    this.#sendControlTimer = setInterval(() => { void this.#flushSendControl(); }, 30_000);
+    this.#sendControlTimer.unref?.();
+  }
+
+  #stopSendControlTimer() {
+    if (!this.#sendControlTimer) return;
+    clearInterval(this.#sendControlTimer);
+    this.#sendControlTimer = null;
+  }
+
+  async #recordSendControlUsage(segments) {
+    if (!this.#sendControl.budget.enabled) return;
+    if (typeof this.#state.setSendControlUsage !== 'function') return;
+    const usage = recordSendUsage(this.#state.sendControlUsage?.(), {
+      now: Date.now(), segments, windowMs: this.#sendControl.budget.windowMs,
+    });
+    await this.#state.setSendControlUsage(usage).catch(() => undefined);
+  }
+
+  /** Flush quiet-hours deferrals and unfreeze deferred rows when the gate opens. */
+  async #flushSendControl() {
+    this.#quietQueue.dropExpired();
+    if (isWithinQuietHours(Date.now(), this.#sendControl.quietHours)) return;
+    for (const key of this.#quietQueue.keys()) {
+      for (const item of this.#quietQueue.takeAll(key)) {
+        try {
+          await this.sendProactiveText(item.target, item.text, { format: item.format });
+        } catch {
+          // The gate re-applied: dry-run/budget leave it unsent; a new quiet
+          // window re-queues it on the next attempt.
+        }
+      }
+    }
+    this.#bridge?.resumeDeferredByGate?.();
+  }
+
   async sendProactiveText(target, text, { signal, format = 'plain' } = {}) {
     const nativeId = target?.kind === 'user'
       ? (typeof target?.route?.userOpenId === 'string' ? target.route.userOpenId.trim() : '')
@@ -154,6 +309,34 @@ export class QqRuntime {
       scope: target.kind === 'user' ? 'c2c' : 'group',
       targetId: nativeId,
     };
+    // L3 gate: dry-run -> budget -> quiet hours. Passive replies never reach
+    // this method, so L2 stays ungated by design.
+    const decision = evaluateProactiveOutbound({
+      sendControl: this.#sendControl,
+      usage: this.#state.sendControlUsage?.(),
+      text,
+      format,
+    });
+    const segments = decision.segments;
+    const conversationKey = `${replyTarget.scope}:${replyTarget.targetId}`;
+    if (decision.action === 'dry-run') {
+      this.#dryRun.record({ kind: 'proactive', conversationKey, segments: decision.segments });
+      const error = new Error('QQ proactive delivery suppressed by dry-run');
+      error.code = 'send-dry-run';
+      throw error;
+    }
+    if (decision.action === 'deny-budget') {
+      const error = new Error(`QQ send budget exhausted (${decision.used}/${decision.limit} segments)`);
+      error.code = 'send-budget-exhausted';
+      throw error;
+    }
+    if (decision.action === 'defer-quiet') {
+      this.#quietQueue.enqueue(conversationKey, { target, text, format });
+      const error = new Error('QQ proactive delivery deferred by quiet hours');
+      error.code = 'send-deferred-quiet';
+      throw error;
+    }
+    await this.#recordSendControlUsage(decision.segments);
     if (format === 'markdown') {
       await sendMarkdownReply(this.#bot, replyTarget, text, {
         logger: this.#logger, signal, requireComplete: true,
@@ -174,6 +357,7 @@ export class QqRuntime {
 
   async #start() {
     await this.stop();
+    this.#startSendControlTimer();
     this.#status.startedAt = new Date().toISOString();
     this.#status.qqConnectionState = 'connecting';
     this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
@@ -203,6 +387,8 @@ export class QqRuntime {
     const controller = new AbortController();
     this.#abortController = controller;
     this.#bot = bot;
+    try { this.#applyGroupMemory(); }
+    catch (error) { await this.stop(); throw error; }
     this.#bridge = new QqHarnessBridge({
       bot,
       ownerUserOpenid: this.#config.ownerUserOpenid,
@@ -211,7 +397,14 @@ export class QqRuntime {
       contextEnhancement: this.#contextEnhancement,
       accessPolicy: this.#accessPolicy,
       paused: this.#paused,
+      sendControl: this.#sendControl,
       status: this.#status,
+      groupParticipation: this.#groupParticipation,
+      participationReply: this.#participationReply,
+      persona: this.#persona,
+      stickersEnabled: this.#stickersEnabled,
+      groupContextEnabled: this.#groupContextEnabled,
+      groupMemory: this.#groupMemoryEnabled && this.#groupContextEnabled ? this.#groupMemory : null,
       logger: this.#logger,
       replyTimeoutMs: this.#replyTimeoutMs,
       signal: controller.signal,
@@ -323,6 +516,7 @@ export class QqRuntime {
   }
 
   async stop() {
+    this.#stopSendControlTimer();
     const bot = this.#bot;
     const bridge = this.#bridge;
     const runTask = this.#runTask;
@@ -341,6 +535,7 @@ export class QqRuntime {
       new Promise((resolve) => setTimeout(resolve, 2_000)),
     ]);
     await bridge?.waitForIdle();
+    await this.#groupMemory?.close();
     this.#status.ready = false;
     this.#status.qqConnectionState = 'idle';
     return this.status;

@@ -21,7 +21,9 @@ function chevron(open = false) {
   h('path', { d: 'm6 4 4 4-4 4', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }));
 }
 
-export function ModelEditor({ model = null, disabled = false, onSave }) {
+export function ModelEditor({ model = null, disabled = false, onSave,
+  title = '模型与思考强度', defaultModelLabel = '跟随默认模型',
+  help = '只影响新建会话；若当前聊天已有会话，先发送 /new，再发送普通消息生效。' }) {
   const catalog = normalizeModelCatalog(React.useContext(ModelCatalogContext));
   const id = React.useId();
   const rootRef = React.useRef(null);
@@ -43,7 +45,7 @@ export function ModelEditor({ model = null, disabled = false, onSave }) {
     && !reasoning?.efforts.some((level) => level.id === effort);
   const defaultName = reasoning?.efforts.find((level) => level.id === reasoning.defaultEffort)?.name;
   const defaultLabel = localizeText('跟随模型默认') + (defaultName ? ` · ${defaultName}` : '');
-  const effortLabel = !current ? localizeText('跟随默认模型')
+  const effortLabel = !current ? localizeText(defaultModelLabel)
     : effort === undefined ? defaultLabel : effortEntry?.name ?? effort;
   const effortHint = !current ? '先选择模型，再设置思考强度。'
     : !currentAvailable ? null
@@ -135,7 +137,7 @@ export function ModelEditor({ model = null, disabled = false, onSave }) {
     },
   },
   h('div', { className: 'dim-presetHeader' },
-    h('span', { className: 'dim-presetTitle' }, '模型与思考强度',
+    h('span', { className: 'dim-presetTitle' }, title,
       h('span', { className: 'dim-presetHelp' },
         h('button', { type: 'button', className: 'dim-presetHelpButton',
           'aria-label': '查看模型设置说明', 'aria-describedby': `${id}-help` },
@@ -143,15 +145,15 @@ export function ModelEditor({ model = null, disabled = false, onSave }) {
         h('span', { id: `${id}-help`, className: 'dim-presetTooltip', role: 'tooltip' },
           effortHint && !effortUnavailable
             ? h('span', { id: `${id}-hint` }, effortHint, ' ') : null,
-          '只影响新建会话；若当前聊天已有会话，先发送 /new，再发送普通消息生效。'))),
+          help))),
     saving ? h('span', { className: 'dim-presetStatus', role: 'status' }, '保存中…') : null),
-  row('model', '模型', entry?.name ?? (current ? modelSelectionId(current) : localizeText('跟随默认模型'))),
+  row('model', '模型', entry?.name ?? (current ? modelSelectionId(current) : localizeText(defaultModelLabel))),
   row('effort', '思考强度', effortLabel, effortDisabled),
   pane ? h('div', { ref: menuRef, id: `${id}-menu`, role: 'menu',
     'aria-label': pane === 'model' ? '模型' : '思考强度', 'aria-busy': saving,
     className: 'dim-modelMenu' },
   pane === 'model' ? [
-    option('default', '跟随默认模型', null, !current, null),
+    option('default', defaultModelLabel, null, !current, null),
     ...catalog.groups.map((group) => h('section', { key: group.id, role: 'group', 'aria-label': group.name },
       h('div', { className: 'dim-modelGroupTitle' }, group.name),
       ...group.models.map((choice) => {

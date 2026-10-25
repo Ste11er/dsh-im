@@ -1,3 +1,6 @@
+import { installQqCapabilitiesContext } from './channels/qq/capabilities-context.mjs';
+import { installQqMemoryTool } from './channels/qq/memory-tool.mjs';
+import { installQqPersonaContext } from './channels/qq/persona-context.mjs';
 import { apply as applyDingtalk } from './channels/dingtalk/index.mjs';
 import { apply as applyDiscord } from './channels/discord/index.mjs';
 import { apply as applyOffice } from './channels/office/index.mjs';
@@ -13,6 +16,8 @@ import { apply as applyIMessage } from './channels/imessage/index.mjs';
 import { apply as applyEmail } from './channels/email/index.mjs';
 import { apply as applyMatrix } from './channels/matrix/index.mjs';
 import { installOutboundArtifactTool } from '../../src/channels/shared/semantic/artifact.mjs';
+import { installQqStickerTool } from './channels/qq/sticker-tool.mjs';
+import { installQqParticipationPolicy } from './channels/qq/participation-policy.mjs';
 import { installHostLanguage } from './host-language.mjs';
 import { installHostLanguageRpc } from './host-language-rpc.mjs';
 import { installDeliveryRpc } from './delivery-rpc.mjs';
@@ -147,9 +152,19 @@ export function createImHostPlugin(internals = {}) {
     if (typeof ctx?.inject === 'function') {
       ctx.inject(['tools', 'systemPrompt'], (artifactCtx) => {
         installOutboundArtifactTool(artifactCtx);
+        installQqStickerTool(artifactCtx, { config: config.qq ?? {} });
+        installQqPersonaContext(artifactCtx);
+        installQqCapabilitiesContext(artifactCtx);
+        installQqMemoryTool(artifactCtx);
+        installQqParticipationPolicy(artifactCtx);
       });
     } else {
       installOutboundArtifactTool(ctx);
+      installQqStickerTool(ctx, { config: config.qq ?? {} });
+      installQqPersonaContext(ctx);
+      installQqCapabilitiesContext(ctx);
+      installQqMemoryTool(ctx);
+      installQqParticipationPolicy(ctx);
     }
     const logger = typeof ctx?.logger === 'function'
       ? ctx.logger(name)

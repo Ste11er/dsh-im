@@ -1530,14 +1530,14 @@ test(`QQ group questions require the initiating actor and preserve multi-questio
   await Promise.all([first, bystander]);
   assert.deepEqual(asked, [
     { sessionId: 'session-group', text: '启动群聊交互' },
-    { sessionId: 'session-group', text: '旁观者的普通问题' },
   ]);
   assert.equal(asked.some(({ text }) => [
     '未提及机器人的答案',
     '2',
     '1，文档，发布说明',
   ].includes(text)), false);
-  assert.deepEqual(sent.slice(-2).map(({ text }) => text), ['发起者交互完成', '旁观者问题已回答']);
+  assert.equal(sent.at(-1).text, '发起者交互完成');
+  assert.equal(sent.some(({ text }) => text === '旁观者问题已回答'), false);
 });
 }
 

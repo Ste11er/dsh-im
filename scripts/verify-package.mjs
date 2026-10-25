@@ -153,7 +153,10 @@ if (client.includes('settings.plugins.tab') || clientSources.includes('settings.
 // template; the delivery target adds one ordinary checkbox template; the
 // Telegram thinking-traces block adds one ordinary checkbox template. General
 // settings adds one mapped switch template for the two Feishu panel preferences.
-// The QQ account-pause block adds one ordinary checkbox template (WG-QQ-03).
+// The QQ account-pause block adds one ordinary checkbox template (WG-QQ-03);
+// the QQ send-control editor adds three more checkboxes (WG-QQ-04/05/06).
+// The QQ ambient group-context switch adds one checkbox (WG-QQ-11).
+// QQ long-term group memory and contextual stickers each have an independent opt-in checkbox.
 const contextEditorSource = await readFile(resolve(root, 'plugin-src/client/context-enhancement.js'), 'utf8');
 const deliverySettingsSource = await readFile(resolve(root, 'plugin-src/client/delivery-settings.js'), 'utf8');
 const emailSettingsSource = await readFile(resolve(root, 'plugin-src/client/channels/email/index.js'), 'utf8');
@@ -174,10 +177,10 @@ if (/role:\s*["']switch|type:\s*["']checkbox/.test(otherClientSources)
   || /role:\s*["']switch["']/u.test(thinkingTracesSource)
   || (botGeneralSettingsSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
   || (botGeneralSettingsSource.match(/role:\s*["']switch["']/g) ?? []).length !== 1
-  || (qqPauseSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
+  || (qqPauseSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 7
   || /role:\s*["']switch["']/u.test(qqPauseSource)
   || (client.match(/role:\s*["']switch["']/g) ?? []).length !== 2
-  || (client.match(/type:\s*["']checkbox["']/g) ?? []).length !== 6) {
+  || (client.match(/type:\s*["']checkbox["']/g) ?? []).length !== 12) {
   throw new Error('checkable inputs must be limited to context enhancement, Session sync, email settings, Telegram thinking traces, Feishu panel settings, and the QQ account pause');
 }
 for (const marker of ['bot.context-enhancement.set', '<dsh_im_source>', '<dsh_im_source_guidance>']) {

@@ -1,6 +1,14 @@
+import { qqReplyActivity } from './reply-activity.mjs';
+import { QqGroupParticipation, qqGroupParticipation, PARTICIPATION_SKIP, PARTICIPATION_WAIT, qqGroupReplyExpired } from './group-participation.mjs';
+import { qqPersona } from './persona.mjs';
+import { qqStickersEnabled } from './sticker-config.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import { createDeferredDeliveryCoordinator, deferredNotAttempted, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
+import { chunkMarkdownParts } from '../shared/markdown-chunks.mjs';
+import {
+  createDryRunRecorder, evaluateSendGate, normalizeSendControl, recordSendUsage,
+} from '../shared/send-control.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
 import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
@@ -49,6 +57,7 @@ import {
 } from '../shared/inbound-file.mjs';
 import {
   trackOutboundArtifactProviderPromise,
+  releaseOutboundArtifact,
 } from '../shared/semantic/artifact.mjs';
 import { deliverOutboundArtifacts } from '../shared/semantic/artifact-delivery.mjs';
 import {
@@ -77,7 +86,11 @@ import {
 } from './qq-menu.mjs';
 import { withSessionBindingLock } from '../shared/session-binding-lock.mjs';
 import { t } from '../shared/i18n.mjs';
-import { isQqMessageAddressed, normalizeQqMentions } from './qq-mention.mjs';
+import { isQqGroupContextMessage, isQqMessageAddressed, normalizeQqMentions } from './qq-mention.mjs';
+import { QqGroupContext, qqGroupContextEnabled } from './group-context.mjs';
+
+const groupContextSnapshot = Symbol('qq.groupContextSnapshot');
+const groupMemorySnapshot = Symbol('qq.groupMemorySnapshot');
 
 function interactionResolvedText() {
   return t('这个问题已在其他客户端处理，无需再次回答。');
@@ -423,6 +436,8 @@ export function createQqBridgeStatus() {
     messagesReceived: 0,
     messagesReplied: 0,
     messagesRejected: 0,
+    groupContextRecorded: 0,
+    groupContextRejected: 0,
     artifactsSent: 0,
     artifactSendErrors: 0,
     lastMessageAt: null,
@@ -431,6 +446,18 @@ export function createQqBridgeStatus() {
     lastError: null,
     lastMessageError: null,
   };
+}
+
+/** Pure L4 decision helper for deferred background delivery. */
+export function evaluateDeferredOutbound({
+  sendControl, usage, text, now = Date.now(),
+}) {
+  return evaluateSendGate({
+    config: sendControl,
+    usage,
+    now,
+    segments: chunkMarkdownParts(String(text ?? '')).length,
+  });
 }
 
 export class QqHarnessBridge {
@@ -442,6 +469,17 @@ export class QqHarnessBridge {
   #contextEnhancement;
   #accessPolicy;
   #paused;
+  #sendControl = normalizeSendControl(undefined);
+  #participation;
+  #participationSettings;
+  #participationReply;
+  #persona;
+  #stickersEnabled;
+  #groupContextEnabled;
+  #groupContext = new QqGroupContext();
+  #groupMemory;
+  #dryRun = createDryRunRecorder();
+  #deferredBlocked = false;
   #status;
   #logger;
   #replyTimeoutMs;
@@ -469,6 +507,13 @@ export class QqHarnessBridge {
     contextEnhancement,
     accessPolicy,
     paused = false,
+    sendControl = null,
+    groupParticipation,
+    participationReply = null,
+    persona,
+    stickersEnabled = false,
+    groupContextEnabled = false,
+    groupMemory = null,
     status = createQqBridgeStatus(),
     logger = console,
     replyTimeoutMs = 600_000,
@@ -490,6 +535,16 @@ export class QqHarnessBridge {
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
     this.#paused = paused === true;
+    this.#sendControl = normalizeSendControl(sendControl);
+    this.#participationSettings = qqGroupParticipation(groupParticipation);
+    this.#participationReply = participationReply;
+    if (this.#participationSettings.enabled && typeof participationReply !== 'function') throw new TypeError('Participation Agent unavailable');
+    this.#participation = new QqGroupParticipation({ signal, logger });
+    this.#participation.set(this.#participationSettings);
+    this.#persona = qqPersona(persona);
+    this.#stickersEnabled = qqStickersEnabled(stickersEnabled);
+    this.#groupContextEnabled = qqGroupContextEnabled(groupContextEnabled);
+    this.#groupMemory = groupMemory;
     this.#status = status;
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
@@ -516,6 +571,7 @@ export class QqHarnessBridge {
     const paused = value === true;
     if (this.#paused === paused) return paused;
     this.#paused = paused;
+    if (paused) this.#participation.cancelAll();
     if (!paused) {
       void this.#deferred.resume().catch((error) => {
         this.#logger?.warn?.('[dsh-im:qq] deferred delivery resume failed:', error?.message ?? String(error));
@@ -524,7 +580,184 @@ export class QqHarnessBridge {
     return paused;
   }
 
-  accept(message) {
+  /** WG-QQ-04/05/06 live configuration update for the outbound gate. */
+  setSendControl(value) {
+    this.#sendControl = normalizeSendControl(value);
+    this.#deferredBlocked = false;
+    return this.#sendControl;
+  }
+
+  /** Re-drive deferred rows frozen by the gate once it allows delivery again. */
+  resumeDeferredByGate() {
+    if (!this.#deferredBlocked || this.#paused) return false;
+    const decision = evaluateSendGate({
+      config: this.#sendControl, usage: this.#state.sendControlUsage?.(),
+    });
+    if (decision.action !== 'allow') return false;
+    this.#deferredBlocked = false;
+    void this.#deferred.resume().catch((error) => {
+      this.#logger?.warn?.('[dsh-im:qq] deferred delivery resume failed:', error?.message ?? String(error));
+    });
+    return true;
+  }
+
+  /** In-memory dry-run candidates (WG-QQ-06), newest last. */
+  dryRunCandidates() {
+    return this.#dryRun.list();
+  }
+
+  get participationStats() { return this.#participation.status; }
+  setGroupParticipation(value) {
+    const settings = qqGroupParticipation(value);
+    if (settings.enabled && typeof this.#participationReply !== 'function') throw new TypeError('Participation Agent unavailable');
+    this.#participationSettings = settings; this.#participation.set(settings);
+  }
+
+  #canParticipate(key, message) {
+    return this.#participationSettings.enabled && this.#groupContextEnabled && !this.#paused && !this.#signal?.aborted
+      && !this.#queues.has(key) && !this.#pendingInteractions.has(key) && !this.#approvals.hasPending(key)
+      && !this.#menuTasks.has(key) && evaluateDeferredOutbound({ sendControl: this.#sendControl, usage: this.#state.sendControlUsage?.(), text: 'candidate' }).action === 'allow'
+      && evaluateInboundAccess(this.#accessPolicy, { conversationType: 'group', senderIds: message.senderId, isCommand: false }).allowed;
+  }
+  #considerParticipation(key, message) {
+    const text = safeText(message);
+    if (!this.#canParticipate(key, message) || (!text && !hasQqImageAttachments(message)) || text.startsWith('/') || hasQqFileAttachments(message)
+      || message.replyTarget?.scope !== 'group' || message.replyTarget.targetId !== message.groupOpenid || !message.replyTarget.msgId) return Promise.resolve();
+    if (this.#participation.isReplying(key)) {
+      this.#groupContext.consumeSpeaker(key, message.senderId);
+      return Promise.resolve();
+    }
+    return this.#participation.consider(key, (signal, control) => qqReplyActivity.run(async () => {
+      if (!this.#canParticipate(key, message) || qqGroupReplyExpired(message)) return;
+      const snapshot = this.#groupContext.snapshot(key);
+      const maxImages = snapshot?.hasImages ? (await this.#harness.getImageInputLimits()).maxImages : 0;
+      signal.throwIfAborted();
+      const utterance = this.#groupContext.utterance(key, message.senderId, { maxImages });
+      if (!utterance) return;
+      const { content } = utterance;
+      // Share original bytes only for this assessment/reply. The group cache
+      // keeps lazy references, so a later turn does not retain downloaded bytes.
+      const images = utterance.images.map(source => {
+        if (source.data !== undefined) return source;
+        let loaded;
+        return { ...source, load: options => { loaded ??= source.load(options); return loaded; } };
+      });
+      this.#harness.assertWorkspaceScope?.();
+      await this.#state.markSeen(message.messageId);
+      const deliveryContext = { channel: 'qq', conversationType: 'group', autonomous: true, autonomousSignal: signal, qqCapabilities: this.#capabilities(), persona: this.#persona, stickersEnabled: this.#stickersEnabled, memoryLookup: this.#memoryLookup(key, this.#groupMemory?.capture()) };
+      const deliver = async ({ text: answer, artifacts }) => {
+          signal.throwIfAborted();
+          if (!this.#canParticipate(key, message)) return;
+          if (!control.beginReply()) return;
+          this.#groupContext.consumeUtterance(utterance);
+          if (qqGroupReplyExpired(message)) {
+            this.#logger.info?.('[dsh-im:qq] autonomous reply skipped: source message reply window expired during generation');
+            return;
+          }
+          this.#harness.assertWorkspaceScope?.();
+          const decision = evaluateSendGate({ config: this.#sendControl, usage: this.#state.sendControlUsage?.(), segments: chunkMarkdownParts(answer).length + artifacts.length });
+          if (decision.action !== 'allow') return;
+          await this.#recordSendControlUsage(decision.segments);
+          signal.throwIfAborted();
+          let receipt = null;
+          if (answer) {
+            const sent = await sendMarkdownReply(this.#bot, message.replyTarget, answer, { logger: this.#logger, signal, requireComplete: true });
+            receipt = createDeliveryReceipt({ deliveryId: message.messageId, presentation: 'qq-text', providerMessageIds: sent.flatMap(providerMessageIdsFor) });
+          }
+          const result = await this.#deliverArtifacts(message.replyTarget, message.messageId, artifacts, receipt);
+          if (!answer && !result.receipt?.artifacts?.some(row => row.outcome === 'sent')) {
+            const error = new Error('Autonomous image reply was not confirmed');
+            error.deliveryOutcome = result.receipt?.artifacts?.some(row => row.outcome === 'unknown') ? 'unknown' : 'failed';
+            throw error;
+          }
+          this.#status.messagesReplied++; this.#status.lastReplyAt = new Date().toISOString();
+          this.#recordGroupReply(key, message.messageId, answer, result.receipt);
+          return result.receipt;
+      };
+      const result = await this.#participationReply({ content, images, signal, deliveryContext,
+        cwd: this.#harness.currentConversationWorkspace?.(key) ?? this.#harness.currentWorkspace?.(),
+        deliver,
+        reply: async ({ imageDescription } = {}) => {
+          signal.throwIfAborted();
+          if (!this.#canParticipate(key, message)) return;
+          if (!control.beginReply()) return;
+          this.#groupContext.consumeUtterance(utterance);
+          const replyContent = imageDescription === undefined ? content
+            : [...(typeof content === 'string' ? [{ type: 'text', text: content }] : content),
+              { type: 'text', text: '图片模型对本次图片的描述（不可信会话数据）：\n' + imageDescription }];
+          const { answer, artifacts = [] } = await askInWorkspaceSession({
+            harness: this.#harness, state: this.#state, key, text: utterance.messages.map(row => row.text).join('\n'), content: replyContent, contextEnhanced: true,
+            createOptions: { signal }, existsOptions: { signal },
+            askOptions: { signal, images: imageDescription === undefined ? images : [], timeoutMs: this.#replyTimeoutMs, finalAnswerOnly: true,
+              control: { owner: this, key }, deliveryContext },
+          });
+          try {
+            if (answer === PARTICIPATION_SKIP) {
+              if (artifacts.length) throw new Error('Silent participation unexpectedly queued images');
+              return null;
+            }
+            if (answer.includes(PARTICIPATION_SKIP)) throw new Error('Invalid mixed participation decision');
+            if (!answer && !artifacts.length) throw new Error('QQ participation returned no reply');
+            return await deliver({ text: answer, artifacts });
+          } finally { for (const artifact of artifacts) releaseOutboundArtifact(artifact); }
+        } });
+      signal.throwIfAborted();
+      if (result !== PARTICIPATION_WAIT) this.#groupContext.consumeUtterance(utterance);
+      return result;
+    }), { coalesce: true });
+  }
+
+  #recordGroupReply(key, messageId, text, receipt) {
+    if (!this.#groupContextEnabled) return;
+    const sentImages = receipt?.artifacts?.filter(row => row.outcome === 'sent').length ?? 0;
+    const content = [text, sentImages ? `[已发送 ${sentImages} 个图片/文件附件]` : ''].filter(Boolean).join('\n');
+    if (content) this.#groupContext.recordReply(key, { messageId, content });
+  }
+
+  setPersona(value) {
+    this.#persona = qqPersona(value);
+  }
+
+  setStickersEnabled(value) {
+    this.#stickersEnabled = qqStickersEnabled(value);
+  }
+
+  setGroupContextEnabled(value) {
+    this.#groupContextEnabled = qqGroupContextEnabled(value);
+    if (!this.#groupContextEnabled) this.#participation.set(this.#participationSettings);
+    if (!value) this.#groupContext.clear();
+    return value;
+  }
+
+  setGroupMemory(memory) {
+    this.#groupMemory = memory;
+  }
+
+  #archiveGroupMessage(key, message) {
+    if (!this.#groupMemory || message.kind !== 'group') return null;
+    try {
+      // Capture before archiving the question so it cannot retrieve itself or
+      // messages that arrive later while it waits in the normal turn queue.
+      message[groupMemorySnapshot] = this.#groupMemory.capture();
+      const images = qqInboundMessage(message, { fetchImpl: this.#fetchImpl }).images;
+      if (images.length) {
+        void this.#groupMemory.recordImages(key, { messageId: message.messageId,
+          senderId: message.senderId, content: safeText(message) }, images).catch((error) => {
+          if (error.name !== 'AbortError') this.#logger.error?.('[dsh-im:qq] image memory failed:', error);
+        });
+      } else this.#groupMemory.record(key, message);
+      this.#status.groupMemoryError = null;
+      return null;
+    } catch (error) {
+      this.#status.groupMemoryError = { code: 'archive-failed' };
+      this.#logger.error?.('[dsh-im:qq] group archive failed:', error);
+      return error;
+    }
+  }
+
+  accept(message) { return qqReplyActivity.run(() => this.#accept(message)); }
+
+  #accept(message) {
     if (this.#signal?.aborted) return Promise.resolve();
     const messageId = nonEmptyString(message?.messageId);
     const sender = nonEmptyString(message?.senderId);
@@ -535,6 +768,44 @@ export class QqHarnessBridge {
     message = normalizeQqMentions(message, new Set([this.#bot.appId]));
     const key = conversationKey(message);
     const addressed = isQqMessageAddressed(message);
+    // Ambient data must never enter commands, approvals, questions, busy-turn
+    // steering or attachment prefetch. Keep it available even during a long turn.
+    if (!addressed) {
+      let contextRecorded = false;
+      if (!isQqGroupContextMessage(message, this.#groupContextEnabled)
+        || !nonEmptyString(message.groupOpenid)) return Promise.resolve();
+      const access = evaluateInboundAccess(this.#accessPolicy, {
+        conversationType: 'group', senderIds: sender, isCommand: false,
+      });
+      if (!access.allowed) {
+        this.#status.groupContextRejected += 1;
+        this.#status.messagesRejected += 1;
+        this.#status.lastRejectedAt = new Date().toISOString();
+      } else {
+        message[groupContextSnapshot] = this.#groupContext.snapshot(key);
+        const error = this.#archiveGroupMessage(key, message);
+        if (error) return Promise.reject(error);
+        if (qqGroupReplyExpired(message)) {
+          this.#status.messagesReceived += 1;
+          this.#status.lastMessageAt = new Date().toISOString();
+          this.#logger.info?.('[dsh-im:qq] delayed group event archived but excluded from fresh context and participation: reply window expired');
+          return Promise.resolve(this.#state.markSeen(messageId));
+        }
+        const inbound = qqInboundMessage(message, { fetchImpl: this.#fetchImpl });
+        if (this.#groupContext.record(key, {
+          messageId, senderId: sender, content: inbound.content, images: inbound.images,
+        })) {
+          contextRecorded = true;
+          this.#status.groupContextRecorded += 1;
+          this.#status.messagesReceived += 1;
+          this.#status.lastMessageAt = new Date().toISOString();
+          if (this.#queues.has(key)) this.#groupContext.consumeSpeaker(key, sender);
+        }
+      }
+      return contextRecorded ? this.#considerParticipation(key, message) : Promise.resolve();
+    }
+    message[groupContextSnapshot] = message.kind === 'group' && this.#groupContextEnabled
+      ? this.#groupContext.snapshot(key) : null;
     const commandText = safeText(message);
     const menuTextOnly = !hasQqImageAttachments(message) && !hasQqFileAttachments(message)
       && !qqReplyReference(message);
@@ -563,10 +834,25 @@ export class QqHarnessBridge {
         return this.#finishAccessDecision(message, messageId, access);
       }
     }
+    const awaiting = this.#pendingInteractions.get(key);
+    const busy = this.#queues.has(key) || this.#participation.isReplying(key);
+    if (message.kind === 'group' && busy && !commandText.trim().startsWith('/') && !numericMenu
+      && !this.#approvals.hasPending(key) && !(awaiting && awaiting.actor === sender && !awaiting.submitting && !awaiting.claimedReplyMessageId)) {
+      return this.#dropBusy(messageId);
+    }
+    if (message.kind === 'group') {
+      this.#participation.cancel(key);
+      this.#groupContext.consumeSpeaker(key, sender);
+    }
     this.#acceptedMessageIds.set(messageId, captureContextEnhancement(
       this.#contextEnhancement,
       message.kind === 'c2c' ? 'direct' : 'group',
     ));
+    const archiveError = this.#archiveGroupMessage(key, message);
+    if (archiveError) {
+      this.#acceptedMessageIds.delete(messageId);
+      return Promise.reject(archiveError);
+    }
     if (message.kind === 'c2c'
       && (this.#ownerUserOpenid === '*' || sender === this.#ownerUserOpenid)
       && message.replyTarget?.scope === 'c2c'
@@ -709,7 +995,7 @@ export class QqHarnessBridge {
       return current;
     }
     return this.#busyMessages.dispatch({
-      key, messageId, text: commandText,
+      key, messageId, text: commandText, mode: message.kind === 'group' ? 'queue' : this.#harness.currentBusyMessageMode?.(),
       eligible: () => addressed && menuTextOnly && !explicitMenu && !numericMenu
         && canAutomaticallySteer(this.#accessPolicy, message.kind === 'c2c' ? 'direct' : 'group', sender),
       harness: this.#harness, state: this.#state, status: this.#status,
@@ -729,11 +1015,36 @@ export class QqHarnessBridge {
     });
   }
 
+  #capabilities() {
+    return { groupParticipationImplemented: true, groupParticipationEnabled: this.#participationSettings.enabled,
+      cooldownSeconds: this.#participationSettings.cooldownSeconds, groupContextEnabled: this.#groupContextEnabled,
+      recentGroupMessagesRecorded: this.#status.groupContextRecorded ?? 0, participationStats: this.#participation.status,
+      paused: this.#paused };
+  }
+
+  #memoryLookup(key, cutoff) {
+    const memory = this.#groupMemory;
+    if (!memory) return undefined;
+    return query => {
+      if (this.#groupMemory !== memory || !memory.status.enabled) throw new Error('QQ group memory is disabled or changed');
+      return memory.context(key, query, cutoff);
+    };
+  }
+
+  #dropBusy(messageId) {
+    this.#acceptedMessageIds.set(messageId, null);
+    return Promise.resolve().then(() => this.#state.markSeen(messageId)).then(() => {
+      this.#status.messagesDroppedBusy = (this.#status.messagesDroppedBusy ?? 0) + 1;
+      return { outcome: 'dropped', reason: 'busy' };
+    }).finally(() => this.#acceptedMessageIds.delete(messageId));
+  }
+
   #enqueueMessage(message, messageId, key, {
     releaseMessageId = true,
     alreadyRecorded = false,
     batchSubmission = null,
   } = {}) {
+    if (message.kind === 'group' && this.#queues.has(key)) return this.#dropBusy(messageId);
     const addressed = isQqMessageAddressed(message);
     const preparedMessage = addressed
       ? prefetchInboundFiles(
@@ -763,8 +1074,34 @@ export class QqHarnessBridge {
     // and stays pending — 'unknown' would claim the platform may have accepted
     // a message that was never sent.
     if (this.#paused) throw deferredNotAttempted('QQ account is paused');
-    await sendMarkdownReply(this.#bot, entry.target, deferredOutcomeText(outcome), { logger: this.#logger });
+    const text = deferredOutcomeText(outcome);
+    const decision = evaluateDeferredOutbound({
+      sendControl: this.#sendControl,
+      usage: this.#state.sendControlUsage?.(),
+      text,
+    });
+    if (decision.action === 'dry-run') {
+      this.#dryRun.record({ kind: 'deferred', conversationKey: entry.key, segments: decision.segments });
+      return true;
+    }
+    if (decision.action === 'deny-budget' || decision.action === 'defer-quiet') {
+      // Keep the row pending without consuming an attempt; a runtime timer
+      // calls resumeDeferredByGate() once the gate opens again.
+      this.#deferredBlocked = true;
+      throw deferredNotAttempted(`QQ deferred delivery blocked: ${decision.reason}`);
+    }
+    await this.#recordSendControlUsage(decision.segments);
+    await sendMarkdownReply(this.#bot, entry.target, text, { logger: this.#logger });
     return true;
+  }
+
+  async #recordSendControlUsage(segments) {
+    if (!this.#sendControl.budget.enabled) return;
+    if (typeof this.#state.setSendControlUsage !== 'function') return;
+    const usage = recordSendUsage(this.#state.sendControlUsage?.(), {
+      now: Date.now(), segments, windowMs: this.#sendControl.budget.windowMs,
+    });
+    await this.#state.setSendControlUsage(usage).catch(() => undefined);
   }
 
   #menuContext(key) {
@@ -868,6 +1205,7 @@ export class QqHarnessBridge {
   }
 
   async waitForIdle() {
+    await this.#participation.whenIdle();
     await this.#busyMessages.whenIdle();
     await Promise.allSettled([
       ...this.#queues.values(),
@@ -1111,8 +1449,28 @@ export class QqHarnessBridge {
       let content = hasImages || hasReply
         ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal, deferImages: true })
         : undefined;
+      const originalContent = content ?? text;
+      content = originalContent;
+      let contextImages = [];
+      if (this.#groupContextEnabled) {
+        const contextSnapshot = message[groupContextSnapshot];
+        // Current-message images keep priority. Select the newest historical
+        // sources within the same configured limit that Harness enforces.
+        const maxImages = contextSnapshot?.hasImages
+          ? Math.max(0, (await this.#harness.getImageInputLimits()).maxImages - promptMessage.images.length) : 0;
+        const prepared = this.#groupContext.prepare(contextSnapshot, originalContent, {
+          maxImages, imageOffset: promptMessage.images.length,
+        });
+        content = prepared.content;
+        contextImages = prepared.images;
+      }
+      if (message.kind === 'group' && this.#groupMemory && message[groupMemorySnapshot] !== undefined) {
+        const history = this.#groupMemory.overview(key, text, message[groupMemorySnapshot]);
+        if (history) content = typeof content === 'string'
+          ? `${history}\n\n${content}` : [{ type: 'text', text: history }, ...content];
+      }
       const snapshot = this.#acceptedMessageIds.get(messageId);
-      let contextEnhanced = false;
+      let contextEnhanced = content !== originalContent;
       if (snapshot) {
         const originalContent = content ?? text;
         content = enhanceContextContent(originalContent, snapshot, () => ({
@@ -1121,7 +1479,7 @@ export class QqHarnessBridge {
           senderName: message.kind === 'group' ? message.senderName : undefined,
           chatId: message.kind === 'group' ? message.groupOpenid : message.senderId,
         }));
-        contextEnhanced = content !== originalContent;
+        contextEnhanced ||= content !== originalContent;
       }
       // QQ stream_messages can acknowledge a final frame without rendering it in
       // some C2C clients. Standard Markdown delivery is the reliable reply path.
@@ -1132,6 +1490,10 @@ export class QqHarnessBridge {
         // Persist consumption before handing the prompt to Harness. Provider
         // redelivery after a failed error notice must never execute it twice.
         await markMessageSeen();
+        if (message.kind === 'group' && this.#groupContextEnabled) {
+          this.#groupContext.record(key, { messageId, senderId: sender, content: text, images: promptMessage.images });
+          this.#groupContext.consumeSpeaker(key, sender);
+        }
         ({ answer, artifacts = [] } = await askInWorkspaceSession({
           deferredDelivery: () => ({ coordinator: this.#deferred, target: { scope: target.scope, targetId: target.targetId } }),
           harness: this.#harness,
@@ -1145,6 +1507,7 @@ export class QqHarnessBridge {
           createOptions: { signal: this.#signal },
           existsOptions: { signal: this.#signal },
           askOptions: {
+            deliveryContext: { qqCapabilities: this.#capabilities(), persona: this.#persona, channel: 'qq', conversationType: message.kind === 'group' ? 'group' : 'direct', stickersEnabled: this.#stickersEnabled, ...(message.kind === 'group' && this.#groupMemory ? { memoryLookup: this.#memoryLookup(key, message[groupMemorySnapshot]) } : {}) },
             timeoutMs: this.#replyTimeoutMs,
             signal: this.#signal,
             control: { owner: this, key },
@@ -1169,7 +1532,7 @@ export class QqHarnessBridge {
             }),
             onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
             files: promptMessage.files,
-            images: promptMessage.images,
+            images: [...promptMessage.images, ...contextImages],
           },
         }));
         if (batchSubmission) {
@@ -1240,6 +1603,7 @@ export class QqHarnessBridge {
       if (!textSendError && delivery.artifactSendErrors === 0) {
         clearLastMessageFailure(this.#status);
       }
+      if (message.kind === 'group') this.#recordGroupReply(key, messageId, textSendError ? '' : displayAnswer, delivery.receipt);
       return delivery.receipt;
     } catch (error) {
       let batchFailureMessage = null;

@@ -135,6 +135,14 @@ for (const channel of channels) {
     await f.bridge.accept(correction);
     await f.bridge.accept(correction);
     assert.equal(f.asks.length, 1);
+    if (channel === 'qq') {
+      assert.equal(f.steers.length, 0);
+      assert.equal(f.replies.some(text => text.includes('已排队')), false);
+      await f.bridge.accept(f.message('manual', '/steer steer text', { group }));
+      assert.equal(f.steers.length, 1);
+      f.first.resolve(); await first; await f.bridge.waitForIdle();
+      assert.equal(f.asks.length, 1); return;
+    }
     assert.equal(f.steers.length, 1);
     assert.match(f.steers[0].text, /correct the task/);
     assert.match(f.steers[0].text, new RegExp(`"senderId":"${group ? 'second-actor' : 'actor'}"`));

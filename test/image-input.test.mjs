@@ -12,6 +12,7 @@ import { stageInboundFiles } from '../src/channels/shared/inbound-file.mjs';
 import { HarnessClient, HarnessRpcError } from '../src/channels/shared/harness-client.mjs';
 import { TextHarnessBridge } from '../src/channels/shared/text-harness-bridge.mjs';
 import { WecomAppBridge } from '../src/channels/wecom-app/wecom-app-bridge.mjs';
+import { QqHarnessBridge } from '../src/channels/qq/qq-bridge.mjs';
 import { createImageInputRpcHandler, IMAGE_INPUT_ENDPOINTS } from '../plugin-src/host/image-input-rpc.mjs';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
@@ -274,4 +275,31 @@ test('WeCom app media downloads pass through real Harness staging and compressio
   const content = prompts[0].content;
   assert.ok(Buffer.from(content.find((part) => part.type === 'image').data, 'base64').length <= 5 * MB);
   assert.deepEqual(await readFile(join(root, manifest(content)[0].path)), image);
+});
+
+test('QQ recent group pictures pass through real Harness staging into model image blocks', async (t) => {
+  const { root, client, prompts } = await clientFixture(t);
+  const seen = new Set();
+  let downloads = 0;
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async () => ({ id: 'answer' }) }, ownerUserOpenid: '*',
+    groupContextEnabled: true, harness: client,
+    state: { sessionFor: () => 'test-session', hasSeen: id => seen.has(id),
+      markSeen: async id => seen.add(id), setSession: async () => {} },
+    fetchImpl: async () => { downloads++; return new Response(PNG); },
+  });
+  const common = { kind: 'group', groupOpenid: 'test-group', senderId: 'member', senderIsBot: false,
+    timestamp: new Date().toISOString(),
+    replyTarget: { scope: 'group', targetId: 'test-group', msgId: 'question' } };
+  await bridge.accept({ ...common, messageId: 'picture', rawEventType: 'GROUP_MESSAGE_CREATE', content: '',
+    attachments: [{ content_type: 'image/png', filename: 'diagram.png', url: 'https://multimedia.nt.qq.com.cn/test.png' }] });
+  assert.equal(downloads, 0);
+  assert.equal(prompts.length, 0);
+  await bridge.accept({ ...common, messageId: 'question', rawEventType: 'GROUP_AT_MESSAGE_CREATE', content: '解释刚才的图' });
+  assert.equal(downloads, 1);
+  assert.equal(prompts.length, 1);
+  const content = prompts[0].content;
+  assert.equal(content.filter(part => part.type === 'image').length, 1);
+  assert.ok(Buffer.from(content.find(part => part.type === 'image').data, 'base64').equals(PNG));
+  assert.deepEqual(await readFile(join(root, manifest(content)[0].path)), PNG);
 });

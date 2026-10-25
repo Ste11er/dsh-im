@@ -1,3 +1,4 @@
+import { createGroupParticipationReply } from './group-participation-reply.mjs';
 import { getImageInputSettingsStore } from '../../../../src/channels/shared/image-input-settings-store.mjs';
 import { unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -9,6 +10,9 @@ import { QqController } from '../../../../src/channels/qq/qq-controller.mjs';
 import { QqRuntime } from '../../../../src/channels/qq/qq-runtime.mjs';
 import { QqQrAuth } from '../../../../src/channels/qq/qr-auth.mjs';
 import { QqStateStore } from '../../../../src/channels/qq/state-store.mjs';
+import { QqGroupMemory } from '../../../../src/channels/qq/group-memory.mjs';
+import { createGroupMemorySummarizer } from './group-memory-summary.mjs';
+import { createGroupImageDescriber } from './group-image-description.mjs';
 import {
   BotWorkspaceStore,
   createBotWorkspaceScope,
@@ -117,6 +121,21 @@ export async function createProductionController(ctx, config = {}, internals = {
     qrAuth,
     credentials: ctx.credentials,
     configStore: observedConfigStore,
+    validateParticipationModel: async model => {
+      const llm = ctx.get('llm');
+      if (!llm) throw new Error('Model service unavailable');
+      await llm.resolveModelInfo(model.provider, model.model);
+    },
+    validateGroupMemoryModel: async (kind, model) => {
+      const llm = ctx.get('llm');
+      if (!llm) throw new Error('Model service unavailable');
+      const info = await llm.resolveModelInfo(model.provider, model.model);
+      if (kind === 'image' && !info.inputModalities?.includes('image')) {
+        const error = new Error('图片总结需要支持图片输入的模型。');
+        error.code = 'model-selection-invalid';
+        throw error;
+      }
+    },
     logger,
     createRuntime: async ({ botId, config: botConfig, appSecret }) => {
       const state = await stateFor(botId);
@@ -127,11 +146,24 @@ export async function createProductionController(ctx, config = {}, internals = {
       const workspaceScope = createBotWorkspaceScope(harness, {
         botId, workspaces, state, agentPresetCatalog,
       });
+      const getImageSettings = () => getImageInputSettingsStore(config).get();
+      const describeImages = createGroupImageDescriber(ctx,
+        () => configStore.get(botId).groupMemoryModels?.image ?? workspaces.modelFor(botId), getImageSettings);
       return new Runtime({
         config: botConfig,
         appSecret,
         harness: workspaceScope.harness,
         state: workspaceScope.state,
+        participationReply: createGroupParticipationReply(ctx, () => workspaces.modelFor(botId), {
+          selectedJudgeModel: () => configStore.get(botId).groupParticipation?.judgeModel ?? null,
+          getImageSettings, describeImages,
+        }),
+        groupMemory: new QqGroupMemory({
+          path: resolve(paths.bots, botId, 'group-memory.sqlite'),
+          summarize: createGroupMemorySummarizer(ctx, () => configStore.get(botId).groupMemoryModels?.text ?? workspaces.modelFor(botId)),
+          describeImages,
+          logger,
+        }),
         contextEnhancement: { botId, getSettings: () => workspaces.contextEnhancementFor(botId) },
         accessPolicy: accessPolicyProvider(workspaces, botId, {
           channel: 'qq', config: botConfig,
@@ -157,6 +189,12 @@ export async function createProductionController(ctx, config = {}, internals = {
         } catch (error) {
           if (error?.code !== 'ENOENT') throw error;
         }
+      }
+      // deleteBot stops the runtime before this cleanup. Disabling memory
+      // retains archives; explicitly removing the bot removes its own archive.
+      for (const suffix of ['', '-wal', '-shm']) {
+        try { await unlink(resolve(paths.bots, botId, `group-memory.sqlite${suffix}`)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
     },
   });

@@ -1,3 +1,5 @@
+import { ParticipationEditor } from './participation-editor.js';
+import { PersonaEditor } from './persona-editor.js';
 import { ConnectionError, normalizeConnectionError } from '../../connection-error.js';
 import { BotName } from '../../bot-alias.js';
 import * as React from 'react';
@@ -37,6 +39,7 @@ import {
   unwrapRpcResult,
 } from './api.js';
 import { installQqStyles } from './styles.js';
+import { normalizeSendControl } from '../../../../src/channels/shared/send-control.mjs';
 
 const ACTIVE_STATES = new Set(['pending', 'refreshing', 'connecting']);
 
@@ -168,6 +171,88 @@ function RemoveConfirmation({ account, busy, onConfirm, onCancel }) {
       h(Button, { kind: 'danger', onClick: onConfirm, disabled: busy }, busy ? '正在移除…' : '确认移除接入')));
 }
 
+function SendControlEditor({ config, disabled, onSave }) {
+  // Cards rendered by fixtures or older snapshots may omit the field entirely.
+  const [draft, setDraft] = React.useState(() => normalizeSendControl(config));
+  React.useEffect(() => { setDraft(normalizeSendControl(config)); }, [config]);
+  const patchBudget = (patch) => setDraft((current) => ({
+    ...current, budget: { ...current.budget, ...patch },
+  }));
+  const patchQuiet = (patch) => setDraft((current) => ({
+    ...current, quietHours: { ...current.quietHours, ...patch },
+  }));
+  const minutes = Math.max(1, Math.round(draft.budget.windowMs / 60_000));
+  return h('div', { className: 'dqq-sendControl' },
+    h('strong', { className: 'dqq-sendControlTitle' }, '发送控制'),
+    h('label', { className: 'dqq-sendControlRow' },
+      h('input', {
+        type: 'checkbox',
+        checked: draft.budget.enabled,
+        disabled: Boolean(disabled),
+        onChange: (event) => patchBudget({ enabled: event.target.checked }),
+      }),
+      h('span', null, '发送预算：每窗口最多发送段数')),
+    h('label', { className: 'dqq-sendControlRow' },
+      h('span', null, '窗口（分钟）'),
+      h('input', {
+        type: 'number',
+        min: 1,
+        max: 1440,
+        value: minutes,
+        disabled: Boolean(disabled),
+        onChange: (event) => patchBudget({
+          windowMs: Math.max(1, Math.min(1440, Number(event.target.value) || 1)) * 60_000,
+        }),
+      }),
+      h('span', null, '段数上限'),
+      h('input', {
+        type: 'number',
+        min: 1,
+        max: 10000,
+        value: draft.budget.limit,
+        disabled: Boolean(disabled),
+        onChange: (event) => patchBudget({ limit: Math.max(1, Number(event.target.value) || 1) }),
+      })),
+    h('label', { className: 'dqq-sendControlRow' },
+      h('input', {
+        type: 'checkbox',
+        checked: draft.quietHours.enabled,
+        disabled: Boolean(disabled),
+        onChange: (event) => patchQuiet({ enabled: event.target.checked }),
+      }),
+      h('span', null, '安静时段（仅拦主动投递与后台补发）')),
+    h('label', { className: 'dqq-sendControlRow' },
+      h('span', null, '开始'),
+      h('input', {
+        type: 'time',
+        value: draft.quietHours.start,
+        disabled: Boolean(disabled),
+        onChange: (event) => patchQuiet({ start: event.target.value }),
+      }),
+      h('span', null, '结束'),
+      h('input', {
+        type: 'time',
+        value: draft.quietHours.end,
+        disabled: Boolean(disabled),
+        onChange: (event) => patchQuiet({ end: event.target.value }),
+      })),
+    h('label', { className: 'dqq-sendControlRow' },
+      h('input', {
+        type: 'checkbox',
+        checked: draft.dryRun.enabled,
+        disabled: Boolean(disabled),
+        onChange: (event) => setDraft((current) => ({
+          ...current, dryRun: { enabled: event.target.checked },
+        })),
+      }),
+      h('span', null, 'dry-run：只记录候选，不真实发送')),
+    h(Button, {
+      className: 'dim-cardAction',
+      disabled: Boolean(disabled),
+      onClick: () => onSave(draft),
+    }, '保存发送控制'));
+}
+
 function AccountPauseToggle({ paused, disabled, onChange }) {
   return h('label', { className: 'dqq-pause' },
     h('input', {
@@ -183,6 +268,70 @@ function AccountPauseToggle({ paused, disabled, onChange }) {
   );
 }
 
+export function StickersToggle({ enabled, disabled, onChange }) {
+  return h('div', { className: 'dqq-sendControl' },
+    h('label', { className: 'dqq-sendControlRow' }, h('input', {
+      type: 'checkbox', checked: enabled === true, disabled,
+      onChange: event => onChange(event.target.checked),
+    }), '群聊表情包：让 Agent 按语境选择 DeepSeek 表情回复'),
+    h('p', null, '回复时按需选择本地表情；缺图先记录，空闲时补库，不要求每条回复配图，也不启用长期记忆。'),
+    h('p', null, '来源：蓝色大肥鱼与梗鲸（aigengtu.com）公开表情目录；回复仅使用本地缓存。'),
+  );
+}
+
+export function GroupContextToggle({ enabled, disabled, stats, onChange }) {
+  return h('div', { className: 'dqq-sendControl' },
+    h('label', { className: 'dqq-sendControlRow' },
+      h('input', {
+        type: 'checkbox', checked: enabled === true, disabled,
+        onChange: (event) => onChange(event.target.checked),
+      }),
+      '短期群聊上下文：收集未 @ 消息，供被 @ 时问答使用'),
+    h('p', null, '默认关闭；仅内存保留 15 分钟，每群最多 20 条、每条 512 字符、每次最多 8 KiB；关闭即清空。'),
+    h('p', null, '短期缓存本身不单独调用模型或回复。开启前请确认机器人可接收全量群消息，并告知群成员。'),
+    h('p', null, '近期图片只暂存引用，被 @ 提问时才读取；原图沿用现有问答附件的保存和清理设置。'),
+    stats ? h('p', null, '已收集：', stats.recorded, ' · ', '访问策略拒绝：', stats.rejected) : null,
+  );
+}
+
+export function GroupMemoryToggle({ enabled, contextEnabled, disabled, status, onChange, onCompact }) {
+  return h('div', { className: 'dqq-sendControl' },
+    h('label', { className: 'dqq-sendControlRow' },
+      h('input', {
+        type: 'checkbox', checked: enabled === true,
+        disabled: Boolean(disabled) || (!contextEnabled && !enabled),
+        onChange: (event) => onChange(event.target.checked),
+      }), '长期群记忆：本地压缩归档、模型摘要与按需检索'),
+    h('p', null, '需开启群聊上下文。启用后保存群消息正文，旧消息会单独调用文本总结模型生成摘要；不会自动向群里回复。'),
+    h('p', null, '关闭后停止归档和摘要，已有本地历史保留；重启后可恢复。'),
+    h('p', null, '图片先由独立 Agent 识别成文字，再与原消息文字一起保存；识图会单独调用图片总结模型。'),
+    status ? h('p', null,
+      '已归档：', status.archived ?? '—', ' · ', '摘要：', status.summaries ?? '—',
+      ' · ', '待摘要：', status.pending ?? '—', ' · ', '待识图：', status.pendingImages ?? '—') : null,
+    status?.lastError ? h('p', { role: 'status' }, status.lastError.code === 'archive-failed'
+      ? '原文归档失败，该消息未确认保存，请查看诊断记录。'
+      : status.lastError.code === 'image-summary-failed'
+        ? '图片识别失败，已有文字保留，图片内容尚未确认保存。'
+        : '摘要处理失败，已归档原文保留，请查看诊断记录。') : null,
+    enabled && !contextEnabled ? h('p', null, '群聊上下文已关闭，长期记忆暂停。') : null,
+    h(Button, {
+      className: 'dim-cardAction', disabled: Boolean(disabled) || !enabled || !contextEnabled || status?.summarizing,
+      onClick: onCompact,
+    }, status?.summarizing ? '正在生成摘要…' : '立即生成摘要'),
+  );
+}
+
+export function GroupMemoryModelEditor({ models, disabled, onSave }) {
+  return h('div', null, ...['image', 'text'].map(kind => h(ModelEditor, {
+    key: kind, model: models?.[kind] ?? null, disabled,
+    title: kind === 'image' ? '长期记忆：图片总结模型' : '长期记忆：文本总结模型',
+    defaultModelLabel: '跟随机器人 / Host 默认模型',
+    help: kind === 'image' ? '保存后用于后续图片识别任务；需要支持图片输入。正在运行的任务继续使用原模型。'
+      : '保存后用于后续群聊文字摘要；不影响正常聊天模型，也不启用长期记忆。',
+    onSave: model => onSave(kind, model),
+  })));
+}
+
 export function AccountCard({
   account,
   busy,
@@ -195,6 +344,14 @@ export function AccountCard({
   onAgentPresetSave,
   onContextEnhancementSave,
   onPauseChange,
+  onSendControlSave,
+  onParticipationSave,
+  onPersonaSave,
+  onStickersChange,
+  onGroupContextChange,
+  onGroupMemoryChange,
+  onGroupMemoryCompact,
+  onGroupMemoryModelSave,
   onRequestRemove,
   onConfirmRemove,
   onCancelRemove,
@@ -259,6 +416,26 @@ export function AccountCard({
         disabled: Boolean(busy),
         onChange: onPauseChange,
       }),
+      h(SendControlEditor, {
+        config: account.sendControl,
+        disabled: Boolean(busy),
+        onSave: onSendControlSave,
+      }),
+      h(ParticipationEditor, { settings: account.groupParticipation, contextEnabled: account.groupContextEnabled, stats: account.participationStats, disabled: Boolean(busy), onSave: onParticipationSave }),
+      h(PersonaEditor, { persona: account.persona, disabled: Boolean(busy), onSave: onPersonaSave }),
+      h(StickersToggle, { enabled: account.stickersEnabled, disabled: Boolean(busy), onChange: onStickersChange }),
+      h(GroupContextToggle, {
+        enabled: account.groupContextEnabled,
+        disabled: Boolean(busy),
+        stats: account.groupContextStats,
+        onChange: onGroupContextChange,
+      }),
+      h(GroupMemoryToggle, {
+        enabled: account.groupMemoryEnabled, contextEnabled: account.groupContextEnabled,
+        disabled: Boolean(busy), status: account.groupMemory,
+        onChange: onGroupMemoryChange, onCompact: onGroupMemoryCompact,
+      }),
+      h(GroupMemoryModelEditor, { models: account.groupMemoryModels, disabled: Boolean(busy), onSave: onGroupMemoryModelSave }),
       h('div', { className: 'ddt-accountFooter dim-cardFooter' },
         h('div', { className: 'dim-cardFooterLayout' },
           h('div', { className: 'ddt-actions dim-cardActions' },
@@ -569,6 +746,30 @@ export function QqSettingsTab({ rpcCall }) {
               'pause',
               QQ_ENDPOINTS.setAccountPause,
               { botId: account.botId, paused },
+            ),
+            onSendControlSave: (sendControl) => botAction(
+              account,
+              'send-control',
+              QQ_ENDPOINTS.setSendControl,
+              { botId: account.botId, sendControl },
+            ),
+            onParticipationSave: settings => botAction(account, 'group-participation', QQ_ENDPOINTS.setGroupParticipation, { botId: account.botId, settings }),
+            onPersonaSave: persona => botAction(account, 'persona', QQ_ENDPOINTS.setPersona, { botId: account.botId, persona }),
+            onStickersChange: (enabled) => botAction(account, 'stickers', QQ_ENDPOINTS.setStickers, { botId: account.botId, enabled }),
+            onGroupContextChange: (enabled) => botAction(
+              account, 'group-context', QQ_ENDPOINTS.setGroupContext,
+              { botId: account.botId, enabled },
+            ),
+            onGroupMemoryChange: (enabled) => botAction(
+              account, 'group-memory', QQ_ENDPOINTS.setGroupMemory,
+              { botId: account.botId, enabled },
+            ),
+            onGroupMemoryCompact: () => botAction(
+              account, 'group-memory-compact', QQ_ENDPOINTS.compactGroupMemory, { botId: account.botId },
+            ),
+            onGroupMemoryModelSave: (kind, selectedModel) => botAction(
+              account, 'group-memory-model', QQ_ENDPOINTS.setGroupMemoryModel,
+              { botId: account.botId, kind, model: selectedModel },
             ),
             onRequestRemove: () => setRemoveTarget(account.botId),
             onCancelRemove: () => setRemoveTarget(null),

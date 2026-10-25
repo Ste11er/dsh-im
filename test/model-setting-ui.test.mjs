@@ -106,6 +106,14 @@ async function choose(root, label) {
   await act(async () => { option.props.onClick(); await flush(); });
 }
 
+// QQ also has separately titled long-memory selectors. These assertions target
+// the bot's normal chat model; memory selectors have their own routing tests.
+function chatEditor(root) {
+  const editors = root.findAllByType(ModelEditor).filter(node => node.props.title === undefined);
+  assert.equal(editors.length, 1);
+  return editors[0];
+}
+
 test('ModelEditor lists provider groups, explains new-session semantics and clears unavailable values', async (t) => {
   const saved = [];
   const renderer = await mount(t, ModelCatalogContext.Provider, {
@@ -160,6 +168,7 @@ test('all nine cards place model below workspace and save through bot.model.set'
     const second = () => renderer.root.findByProps({ 'data-bot-id': `${channel.name}_1` });
     const editors = first().findAll((node) => (
       [WorkspaceEditor, ModelEditor, AgentPresetEditor].includes(node.type)
+      && (node.type !== ModelEditor || node.props.title === undefined)
     ));
     assert.deepEqual(editors.map((node) => node.type), [
       WorkspaceEditor, ModelEditor, AgentPresetEditor,
@@ -171,16 +180,16 @@ test('all nine cards place model below workspace and save through bot.model.set'
       endpoint: 'bot.model.set',
       payload: { botId: `${channel.name}_0`, model: MODEL },
     }], channel.name);
-    assert.deepEqual(first().findByType(ModelEditor).props.model, MODEL, channel.name);
-    assert.equal(second().findByType(ModelEditor).props.model, null, channel.name);
+    assert.deepEqual(chatEditor(first()).props.model, MODEL, channel.name);
+    assert.equal(chatEditor(second()).props.model, null, channel.name);
     await openMenu(first(), '思考强度');
     assert.match(textOf(first()), /Think through difficult problems/u);
     await choose(first(), 'Maximum');
     assert.deepEqual(calls.filter(({ endpoint }) => endpoint === 'bot.model.set').at(-1).payload, {
       botId: `${channel.name}_0`, model: { ...MODEL, reasoningEffort: 'custom-max' },
     });
-    assert.equal(first().findByType(ModelEditor).props.model.reasoningEffort, 'custom-max');
-    assert.equal(second().findByType(ModelEditor).props.model, null);
+    assert.equal(chatEditor(first()).props.model.reasoningEffort, 'custom-max');
+    assert.equal(chatEditor(second()).props.model, null);
     await openMenu(first(), '思考强度');
     assert.match(textOf(first().findByProps({ 'aria-checked': true })), /Maximum/u);
     await choose(first(), '跟随模型默认');

@@ -1,11 +1,17 @@
+import { qqGroupParticipation } from './group-participation.mjs';
+import { qqPersona } from './persona.mjs';
+import { qqStickersEnabled } from './sticker-config.mjs';
 import { extractConnectionEvidence, atConnectionStage, createConnectionDiagnostics } from '../shared/connection-error.mjs';
 import { randomUUID } from 'node:crypto';
 
 import { connectionTestMessage } from '../shared/connection-test.mjs';
 import { t } from '../shared/i18n.mjs';
+import { normalizeSendControl } from '../shared/send-control.mjs';
 import { publicMessageFailure } from '../shared/message-failure.mjs';
 import { deriveQqBotIdentity, maskQqAppId } from './config-store.mjs';
 import { publicQqStateError } from './state-error.mjs';
+import { qqGroupContextEnabled } from './group-context.mjs';
+import { qqGroupMemoryEnabled, qqGroupMemoryModels } from './group-memory-config.mjs';
 
 const ACTIVE_ATTEMPT_STATES = new Set(['starting', 'pending', 'refreshing', 'connecting']);
 const TERMINAL_ATTEMPT_STATES = new Set(['connected', 'failed', 'cancelled']);
@@ -52,6 +58,8 @@ export class QqController {
   #qrAuth;
   #credentials;
   #configStore;
+  #validateGroupMemoryModel;
+  #validateParticipationModel;
   #createRuntime;
   #deleteState;
   #logger;
@@ -70,6 +78,8 @@ export class QqController {
     configStore,
     createRuntime,
     deleteState = async () => {},
+    validateGroupMemoryModel,
+    validateParticipationModel,
     logger = console,
   }) {
     if (!qrAuth || typeof qrAuth.start !== 'function') throw new TypeError('QQ QR auth is required');
@@ -85,6 +95,8 @@ export class QqController {
     this.#qrAuth = qrAuth;
     this.#credentials = credentials;
     this.#configStore = configStore;
+    this.#validateGroupMemoryModel = validateGroupMemoryModel;
+    this.#validateParticipationModel = validateParticipationModel;
     this.#createRuntime = createRuntime;
     this.#deleteState = deleteState;
     this.#logger = logger;
@@ -225,6 +237,12 @@ export class QqController {
         connectedAt: new Date().toISOString(),
         // Rebinding credentials never silently resumes a paused account.
         ...(previousConfig?.paused === true ? { paused: true } : {}),
+        ...(previousConfig?.groupParticipation === undefined ? {} : { groupParticipation: previousConfig.groupParticipation }),
+        ...(previousConfig?.persona === undefined ? {} : { persona: previousConfig.persona }),
+        ...(previousConfig?.stickersEnabled === true ? { stickersEnabled: true } : {}),
+        ...(previousConfig?.groupContextEnabled === true ? { groupContextEnabled: true } : {}),
+        ...(previousConfig?.groupMemoryEnabled === true ? { groupMemoryEnabled: true } : {}),
+        ...(previousConfig?.groupMemoryModels ? { groupMemoryModels: previousConfig.groupMemoryModels } : {}),
       };
       await atConnectionStage('credential.save', () => this.#credentials.set(identity.secretRef, normalizedSecret), 'credential-store');
       try {
@@ -335,6 +353,149 @@ export class QqController {
     });
   }
 
+  /**
+   * Persist the outbound gate configuration (WG-QQ-04/05/06) and apply it to
+   * the live runtime without reconnecting.
+   */
+  async setSendControl(botId, value) {
+    if (!this.#configStore.get(botId)) throw new Error('Unknown QQ bot');
+    const normalized = normalizeSendControl(value);
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      await atConnectionStage('account.save', () => this.#configStore.save({
+        ...current,
+        sendControl: normalized,
+      }), 'account-config');
+      this.#runtimes.get(botId)?.setSendControl?.(normalized);
+      this.#touch();
+      return this.status();
+    });
+  }
+
+  async setGroupParticipation(botId, value) {
+    const settings = qqGroupParticipation(value);
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      if (settings.judgeModel) {
+        if (typeof this.#validateParticipationModel !== 'function') throw new Error('Participation model validation unavailable');
+        await this.#validateParticipationModel(settings.judgeModel);
+      }
+      if (settings.enabled && !current.groupContextEnabled) throw new Error('Enable group context before participation');
+      await atConnectionStage('account.save', () => this.#configStore.save({ ...current, groupParticipation: settings }), 'account-config');
+      try { this.#runtimes.get(botId)?.setGroupParticipation(settings); }
+      catch (error) {
+        try { await this.#configStore.save(current); }
+        catch (rollbackError) { throw new AggregateError([error, rollbackError], 'Participation and configuration rollback failed'); }
+        throw error;
+      }
+      this.#touch(); return this.status();
+    });
+  }
+
+  async setPersona(botId, value) {
+    const persona = qqPersona(value);
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      await atConnectionStage('account.save', () => this.#configStore.save({ ...current, persona }), 'account-config');
+      const runtime = this.#runtimes.get(botId);
+      if (runtime) runtime.setPersona(persona);
+      this.#touch();
+      return this.status();
+    });
+  }
+
+  async setStickersEnabled(botId, value) {
+    const enabled = qqStickersEnabled(value);
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      const next = { ...current };
+      if (enabled) next.stickersEnabled = true;
+      else delete next.stickersEnabled;
+      await atConnectionStage('account.save', () => this.#configStore.save(next), 'account-config');
+      const runtime = this.#runtimes.get(botId);
+      if (runtime) runtime.setStickersEnabled(enabled);
+      this.#touch();
+      return this.status();
+    });
+  }
+
+  async setGroupContextEnabled(botId, value) {
+    const enabled = qqGroupContextEnabled(value);
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      const next = { ...current };
+      if (enabled) next.groupContextEnabled = true;
+      else delete next.groupContextEnabled;
+      await atConnectionStage('account.save', () => this.#configStore.save(next), 'account-config');
+      const runtime = this.#runtimes.get(botId);
+      if (runtime) runtime.setGroupContextEnabled(enabled);
+      this.#touch();
+      return this.status();
+    });
+  }
+
+  async setGroupMemoryEnabled(botId, value) {
+    const enabled = qqGroupMemoryEnabled(value);
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      if (enabled && current.groupContextEnabled !== true) throw new Error('Enable QQ group context before long memory');
+      const next = { ...current };
+      if (enabled) next.groupMemoryEnabled = true;
+      else delete next.groupMemoryEnabled;
+      const runtime = this.#runtimes.get(botId);
+      await atConnectionStage('account.save', () => this.#configStore.save(next), 'account-config');
+      try {
+        if (runtime) runtime.setGroupMemoryEnabled(enabled);
+      } catch (error) {
+        try { await this.#configStore.save(current); }
+        catch (rollbackError) { throw new AggregateError([error, rollbackError], 'QQ memory initialization and configuration rollback failed'); }
+        throw error;
+      }
+      this.#touch();
+      return this.status();
+    });
+  }
+
+  async setGroupMemoryModel(botId, kind, model) {
+    if (!['text', 'image'].includes(kind)) throw new TypeError('Invalid group memory model kind');
+    const selected = qqGroupMemoryModels({ [kind]: model })[kind];
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      if (selected) {
+        if (typeof this.#validateGroupMemoryModel !== 'function') throw new Error('Group memory model validation unavailable');
+        await this.#validateGroupMemoryModel(kind, selected);
+      }
+      const models = { ...qqGroupMemoryModels(current.groupMemoryModels), [kind]: selected };
+      await this.#configStore.save({ ...current, groupMemoryModels: models });
+      this.#touch();
+      return this.status();
+    });
+  }
+
+  async compactGroupMemory(botId) {
+    return this.#withBotTransition(botId, async () => {
+      const config = this.#configStore.get(botId);
+      const runtime = this.#runtimes.get(botId);
+      if (!config || !runtime?.status.ready || config.groupMemoryEnabled !== true) throw new Error('QQ group memory is not enabled and connected');
+      // Acknowledgement is immediate; the status reports running/completed/
+      // failed. Never hold the account transition lock during a model call:
+      // disabling or removing the bot must still be able to cancel that call.
+      void runtime.compactGroupMemory().catch((error) => {
+        if (error.name !== 'AbortError') this.#logger.error?.('[dsh-im:qq] requested group summary failed:', error);
+        this.#touch();
+      });
+      this.#touch();
+      return this.status();
+    });
+  }
+
   async presentSessionSyncApproval(botId, target, interaction, options = {}) {
     const config = this.#configStore.get(botId);
     if (!config) throw new Error('Unknown QQ bot');
@@ -395,6 +556,20 @@ export class QqController {
         configured: true,
         // Default OFF: only an explicit persisted true pauses the account.
         paused: config.paused === true,
+        // WG-QQ-04/05/06: all-disabled defaults are projected for the editor.
+        sendControl: normalizeSendControl(config.sendControl),
+        groupParticipation: qqGroupParticipation(config.groupParticipation),
+        participationStats: runtimeStatus?.participationStats ?? null,
+        persona: qqPersona(config.persona),
+        stickersEnabled: qqStickersEnabled(config.stickersEnabled),
+        groupContextEnabled: qqGroupContextEnabled(config.groupContextEnabled),
+        groupMemoryEnabled: qqGroupMemoryEnabled(config.groupMemoryEnabled),
+        groupMemoryModels: qqGroupMemoryModels(config.groupMemoryModels),
+        groupMemory: runtimeStatus?.groupMemory ?? null,
+        groupContextStats: {
+          recorded: runtimeStatus?.groupContextRecorded ?? 0,
+          rejected: runtimeStatus?.groupContextRejected ?? 0,
+        },
         bot: { name: t('QQ机器人'), appIdMasked: maskQqAppId(config.appId) },
         health: {
           status: connected ? 'healthy' : state === 'error' ? 'error' : 'offline',
@@ -481,6 +656,12 @@ export class QqController {
       connectedAt: new Date().toISOString(),
       // A rescan keeps the existing pause decision; resuming stays explicit.
       ...(previousConfig?.paused === true ? { paused: true } : {}),
+      ...(previousConfig?.groupParticipation === undefined ? {} : { groupParticipation: previousConfig.groupParticipation }),
+      ...(previousConfig?.persona === undefined ? {} : { persona: previousConfig.persona }),
+      ...(previousConfig?.stickersEnabled === true ? { stickersEnabled: true } : {}),
+      ...(previousConfig?.groupContextEnabled === true ? { groupContextEnabled: true } : {}),
+      ...(previousConfig?.groupMemoryEnabled === true ? { groupMemoryEnabled: true } : {}),
+      ...(previousConfig?.groupMemoryModels ? { groupMemoryModels: previousConfig.groupMemoryModels } : {}),
     };
     return this.#withBotTransition(identity.botId, async () => {
       await atConnectionStage('credential.save', () => this.#credentials.set(identity.secretRef, appSecret), 'credential-store');

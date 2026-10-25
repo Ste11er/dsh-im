@@ -1,8 +1,14 @@
+import { qqGroupParticipation } from './group-participation.mjs';
+import { qqPersona } from './persona.mjs';
+import { qqStickersEnabled } from './sticker-config.mjs';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { t } from '../shared/i18n.mjs';
+import { normalizeSendControl } from '../shared/send-control.mjs';
+import { qqGroupContextEnabled } from './group-context.mjs';
+import { qqGroupMemoryEnabled, qqGroupMemoryModels } from './group-memory-config.mjs';
 
 const EMPTY_DOCUMENT = Object.freeze({ version: 1, bots: Object.freeze([]) });
 
@@ -45,6 +51,7 @@ function normalizeBot(value) {
   if (!appId || !ownerUserOpenid || !botId || !secretRef) return null;
   const derived = deriveQqBotIdentity(appId);
   if (derived.botId !== botId || derived.secretRef !== secretRef) return null;
+  const memoryModels = qqGroupMemoryModels(value.groupMemoryModels);
   return Object.freeze({
     botId,
     appId,
@@ -56,6 +63,15 @@ function normalizeBot(value) {
     // an absent field means paused=false, so untouched bot records keep the
     // exact document shape they had before this feature existed.
     ...(value.paused === true ? { paused: true } : {}),
+    ...(value.groupParticipation === undefined ? {} : { groupParticipation: qqGroupParticipation(value.groupParticipation) }),
+    ...(value.persona === undefined ? {} : { persona: qqPersona(value.persona) }),
+    ...(qqStickersEnabled(value.stickersEnabled) ? { stickersEnabled: true } : {}),
+    ...(qqGroupContextEnabled(value.groupContextEnabled) ? { groupContextEnabled: true } : {}),
+    ...(qqGroupMemoryEnabled(value.groupMemoryEnabled) ? { groupMemoryEnabled: true } : {}),
+    ...(memoryModels.text || memoryModels.image ? { groupMemoryModels: memoryModels } : {}),
+    ...(value.sendControl && typeof value.sendControl === 'object' && !Array.isArray(value.sendControl)
+      ? { sendControl: normalizeSendControl(value.sendControl) }
+      : {}),
   });
 }
 

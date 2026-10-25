@@ -1,3 +1,5 @@
+import { qqGroupParticipation } from '../../../../src/channels/qq/group-participation.mjs';
+import { qqPersona } from '../../../../src/channels/qq/persona.mjs';
 import { normalizeBusyMessageMode } from '../../../../src/channels/shared/message-mode.mjs';
 import { normalizeConnectionError as normalizeTestError } from '../../connection-error.js';
 import { diagnosticFields } from '../../../../src/channels/shared/diagnostic-details.mjs';
@@ -7,6 +9,8 @@ import { normalizeModelCatalog, normalizeModelSelection, SET_MODEL_ENDPOINT } fr
 import { normalizeLastMessageError } from '../../last-message-error.js';
 import { normalizeAccessPolicy } from '../../../../src/channels/shared/access-policy.mjs';
 import { normalizeContextEnhancementConfig } from '../../../../src/channels/shared/context-enhancement.mjs';
+import { normalizeSendControl } from '../../../../src/channels/shared/send-control.mjs';
+import { publicGroupMemoryStatus, qqGroupMemoryModels } from '../../../../src/channels/qq/group-memory-config.mjs';
 
 export const QQ_RPC_CHANNEL = '/qq';
 
@@ -26,6 +30,14 @@ export const QQ_ENDPOINTS = Object.freeze({
   setAccessPolicy: 'bot.access-policy.set',
   setAlias: 'bot.alias.set',
   setAccountPause: 'bot.account-pause.set',
+  setSendControl: 'bot.send-control.set',
+  setGroupContext: 'bot.group-context.set',
+  setGroupParticipation: 'bot.group-participation.set',
+  setPersona: 'bot.persona.set',
+  setStickers: 'bot.stickers.set',
+  setGroupMemory: 'bot.group-memory.set',
+  setGroupMemoryModel: 'bot.group-memory.model.set',
+  compactGroupMemory: 'bot.group-memory.compact',
 });
 
 const PROVISION_STATES = new Set(['starting', 'pending', 'refreshing', 'connecting', 'connected', 'failed', 'cancelled']);
@@ -103,6 +115,21 @@ function normalizeBot(value) {
     // Account-level pause (WG-QQ-03). Default OFF: only an explicit true means
     // the account is paused, so an absent field never reads as paused.
     paused: value.paused === true,
+    sendControl: normalizeSendControl(value.sendControl),
+    groupParticipation: qqGroupParticipation(value.groupParticipation),
+    participationStats: value.participationStats ?? null,
+    persona: qqPersona(value.persona),
+    stickersEnabled: value.stickersEnabled === true,
+    groupContextEnabled: value.groupContextEnabled === true,
+    groupMemoryEnabled: value.groupMemoryEnabled === true,
+    groupMemoryModels: qqGroupMemoryModels(value.groupMemoryModels),
+    groupMemory: publicGroupMemoryStatus(value.groupMemory),
+    groupContextStats: {
+      recorded: Number.isSafeInteger(value.groupContextStats?.recorded) && value.groupContextStats.recorded >= 0
+        ? value.groupContextStats.recorded : 0,
+      rejected: Number.isSafeInteger(value.groupContextStats?.rejected) && value.groupContextStats.rejected >= 0
+        ? value.groupContextStats.rejected : 0,
+    },
     workspace: text(value.workspace, '', 4_096),
     model: normalizeModelSelection(value.model),
     agentPreset: normalizeAgentPresetId(value.agentPreset),

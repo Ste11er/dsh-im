@@ -1,3 +1,5 @@
+import { qqGroupParticipation } from '../../../../src/channels/qq/group-participation.mjs';
+import { qqPersona } from '../../../../src/channels/qq/persona.mjs';
 import { SET_MESSAGE_MODE_ENDPOINT, validMessageModePayload } from '../../../../src/channels/shared/message-mode.mjs';
 import { createConnectionDiagnostics, diagnosticRpcResult } from '../../../../src/channels/shared/connection-error.mjs';
 import { SET_ALIAS_ENDPOINT, validAliasPayload } from '../shared/bot-alias-rpc.mjs';
@@ -22,6 +24,8 @@ export const QQ_RPC_CHANNEL = '/qq';
  * boolean; the response is the ordinary redacted bot snapshot.
  */
 export const SET_ACCOUNT_PAUSE_ENDPOINT = 'bot.account-pause.set';
+export const SET_SEND_CONTROL_ENDPOINT = 'bot.send-control.set';
+export const SET_GROUP_CONTEXT_ENDPOINT = 'bot.group-context.set';
 
 export const QQ_ENDPOINTS = Object.freeze({
   status: 'connection.status',
@@ -39,6 +43,14 @@ export const QQ_ENDPOINTS = Object.freeze({
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
   setAlias: SET_ALIAS_ENDPOINT,
   setAccountPause: SET_ACCOUNT_PAUSE_ENDPOINT,
+  setSendControl: SET_SEND_CONTROL_ENDPOINT,
+  setGroupContext: SET_GROUP_CONTEXT_ENDPOINT,
+  setGroupParticipation: 'bot.group-participation.set',
+  setPersona: 'bot.persona.set',
+  setStickers: 'bot.stickers.set',
+  setGroupMemory: 'bot.group-memory.set',
+  setGroupMemoryModel: 'bot.group-memory.model.set',
+  compactGroupMemory: 'bot.group-memory.compact',
 });
 export const QQ_RPC_ENDPOINTS = Object.freeze(Object.values(QQ_ENDPOINTS));
 
@@ -125,6 +137,39 @@ function payloadFailure(endpoint, payload) {
   if (endpoint === QQ_ENDPOINTS.setAccountPause) {
     return validAccountPausePayload(payload)
       ? null : 'bot.account-pause.set requires a botId and a boolean paused.';
+  }
+  if (endpoint === QQ_ENDPOINTS.setSendControl) {
+    return exactKeys(payload, ['botId', 'sendControl'])
+      && validId(payload.botId)
+      && isRecord(payload.sendControl)
+      ? null : 'bot.send-control.set requires a botId and a sendControl object.';
+  }
+  if ([QQ_ENDPOINTS.setGroupContext, QQ_ENDPOINTS.setGroupMemory, QQ_ENDPOINTS.setStickers].includes(endpoint)) {
+    return exactKeys(payload, ['botId', 'enabled']) && validId(payload.botId)
+      && typeof payload.enabled === 'boolean'
+      ? null : 'bot.group-context.set requires a botId and a boolean enabled.';
+  }
+  if (endpoint === QQ_ENDPOINTS.setGroupParticipation) {
+    try {
+      if (!exactKeys(payload, ['botId', 'settings']) || !validId(payload.botId) || !Object.hasOwn(payload, 'settings')) return '请提交有效的群聊自主参与设置。';
+      qqGroupParticipation(payload.settings); return null;
+    } catch { return '请提交有效的群聊自主参与设置。'; }
+  }
+  if (endpoint === QQ_ENDPOINTS.setPersona) {
+    try {
+      if (!exactKeys(payload, ['botId', 'persona']) || !validId(payload.botId) || !Object.hasOwn(payload, 'persona')) return '请提交有效的人格基线。';
+      qqPersona(payload.persona); return null;
+    } catch { return '请提交有效的人格基线（最多 4000 字符）。'; }
+  }
+  if (endpoint === QQ_ENDPOINTS.setGroupMemoryModel) {
+    return exactKeys(payload, ['botId', 'kind', 'model'])
+      && ['text', 'image'].includes(payload.kind)
+      && validModelPayload({ botId: payload.botId, model: payload.model })
+      ? null : 'bot.group-memory.model.set requires botId, kind and model.';
+  }
+  if (endpoint === QQ_ENDPOINTS.compactGroupMemory) {
+    return exactKeys(payload, ['botId']) && validId(payload.botId)
+      ? null : 'bot.group-memory.compact requires a botId.';
   }
   return 'Unknown QQ endpoint.';
 }
@@ -260,6 +305,30 @@ export function createQqRpcHandler(controller, { encodeQr = qrDataUrl } = {}) {
           await controller.setPaused(payload.botId, payload.paused),
           cachedEncode,
         );
+      } else if (endpoint === QQ_ENDPOINTS.setSendControl) {
+        if (typeof controller.setSendControl !== 'function') throw new Error('Send control update is unavailable');
+        value = await publicStatus(
+          await controller.setSendControl(payload.botId, payload.sendControl),
+          cachedEncode,
+        );
+      } else if (endpoint === QQ_ENDPOINTS.setGroupParticipation) {
+        value = await publicStatus(await controller.setGroupParticipation(payload.botId, payload.settings), cachedEncode);
+      } else if (endpoint === QQ_ENDPOINTS.setPersona) {
+        value = await publicStatus(await controller.setPersona(payload.botId, payload.persona), cachedEncode);
+      } else if (endpoint === QQ_ENDPOINTS.setStickers) {
+        value = await publicStatus(await controller.setStickersEnabled(payload.botId, payload.enabled), cachedEncode);
+      } else if (endpoint === QQ_ENDPOINTS.setGroupContext) {
+        value = await publicStatus(
+          await controller.setGroupContextEnabled(payload.botId, payload.enabled), cachedEncode,
+        );
+      } else if (endpoint === QQ_ENDPOINTS.setGroupMemory) {
+        value = await publicStatus(
+          await controller.setGroupMemoryEnabled(payload.botId, payload.enabled), cachedEncode,
+        );
+      } else if (endpoint === QQ_ENDPOINTS.setGroupMemoryModel) {
+        value = await publicStatus(await controller.setGroupMemoryModel(payload.botId, payload.kind, payload.model), cachedEncode);
+      } else if (endpoint === QQ_ENDPOINTS.compactGroupMemory) {
+        value = await publicStatus(await controller.compactGroupMemory(payload.botId), cachedEncode);
       } else {
         value = await publicStatus(await controller.deleteBot(payload.botId), cachedEncode);
       }
