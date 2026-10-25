@@ -26,6 +26,29 @@ function isMarkdownRejection(error) {
     && MARKDOWN_REJECTION_CODES.has(Number(error.bizCode));
 }
 
+async function sendWithConnectRetry(send, { signal, logger }) {
+  let firstFailure;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    signal?.throwIfAborted();
+    try { return await send(); }
+    catch (error) {
+      // This SDK flattens fetch.cause into ApiError.message. Only the explicit
+      // connection-establishment timeout proves that no request was sent.
+      // Socket/read/request timeouts remain unknown and must not be replayed.
+      if (!(error instanceof ApiError) || error.httpStatus !== 0
+        || !/\bConnect Timeout Error\b/u.test(error.message)) throw error;
+      if (attempt === 0) {
+        firstFailure = error;
+        logger?.warn?.('[dsh-im:qq] connection establishment timed out; retrying the identical request once');
+        continue;
+      }
+      const failure = new AggregateError([firstFailure, error], 'QQ API connection timed out before transmission');
+      failure.code = 'qq-connect-timeout'; failure.deliveryOutcome = 'failed';
+      throw failure;
+    }
+  }
+}
+
 function sendPlainText(bot, target, content, msgSeq) {
   if (typeof bot?.send === 'function') {
     return bot.send({
@@ -58,12 +81,12 @@ export async function sendMarkdownReply(bot, target, text, { logger, signal, req
     if (partialNoticeSent || !target?.msgId) return;
     partialNoticeSent = true;
     try {
-      results.push(await sendPlainText(
+      results.push(await sendWithConnectRetry(() => sendPlainText(
         bot,
         target,
         PARTIAL_REPLY_NOTICE(),
         (firstMsgSeq + chunks.length) & 0xFFFF,
-      ));
+      ), { signal, logger }));
     } catch (error) {
       logger?.warn?.('[dsh-im:qq] unable to send partial reply notice:', error);
     }
@@ -77,17 +100,20 @@ export async function sendMarkdownReply(bot, target, text, { logger, signal, req
       : target;
     if (typeof bot?.send === 'function') {
       try {
-        results.push(await bot.send({
+        const request = {
           target: deliveryTarget,
           msgType: 2,
           markdown: { content: chunk.markdown },
           extra: { msg_seq: msgSeq },
-        }));
+        };
+        results.push(await sendWithConnectRetry(() => bot.send(request), { signal, logger }));
         continue;
       } catch (error) {
         if (!isMarkdownRejection(error)) {
           logger?.warn?.(
-            '[dsh-im:qq] markdown delivery outcome is uncertain; refusing a duplicate-prone retry:',
+            error.deliveryOutcome === 'failed'
+              ? '[dsh-im:qq] markdown delivery failed before request transmission:'
+              : '[dsh-im:qq] markdown delivery outcome is uncertain; refusing a duplicate-prone retry:',
             error,
           );
           if (requireComplete || results.length === 0) throw error;
@@ -102,7 +128,7 @@ export async function sendMarkdownReply(bot, target, text, { logger, signal, req
     // message after a definite Markdown rejection (or on legacy text clients).
     if (chunk.plain.length === 0) continue;
     try {
-      results.push(await sendPlainText(bot, deliveryTarget, chunk.plain, msgSeq));
+      results.push(await sendWithConnectRetry(() => sendPlainText(bot, deliveryTarget, chunk.plain, msgSeq), { signal, logger }));
     } catch (error) {
       if (requireComplete || results.length === 0) throw error;
       await sendPartialNotice();

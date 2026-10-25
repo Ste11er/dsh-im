@@ -279,7 +279,7 @@ export class OutboundArtifactRegistry {
    * Bind one channel delivery consumer to the Turn its request starts.
    * Only this consumer can retain files for delivery after the Turn ends.
    */
-  openConsumer(sessionId, promptRpcId) {
+  openConsumer(sessionId, promptRpcId, deliveryContext) {
     if (typeof sessionId !== 'string' || !sessionId
       || typeof promptRpcId !== 'string' || !promptRpcId) {
       throw new TypeError('sessionId and promptRpcId are required');
@@ -288,6 +288,7 @@ export class OutboundArtifactRegistry {
     const consumer = {
       sessionId,
       promptRpcId,
+      deliveryContext: deliveryContext === undefined ? undefined : Object.freeze({ ...deliveryContext }),
       turn: null,
       released: false,
     };
@@ -377,10 +378,17 @@ export class OutboundArtifactRegistry {
   }
 
   /** Prompt guidance follows the active Turn's actual delivery owner. */
-  hasActiveConsumer(session) {
+  hasActiveConsumer(session, expectedContext) {
     const turn = this.#currentTurn(session);
-    return Number.isInteger(turn)
-      && this.#consumerForTurn(sessionIdOf(session), turn) !== null;
+    const consumer = Number.isInteger(turn) ? this.#consumerForTurn(sessionIdOf(session), turn) : null;
+    return consumer !== null && (expectedContext === undefined || Object.entries(expectedContext)
+      .every(([key, value]) => consumer.deliveryContext?.[key] === value));
+  }
+
+  /** Trusted channel settings for the active Turn only; never parse these from model text. */
+  activeDeliveryContext(session) {
+    const turn = this.#currentTurn(session);
+    return Number.isInteger(turn) ? this.#consumerForTurn(sessionIdOf(session), turn)?.deliveryContext ?? null : null;
   }
 
   /** A disposed Session cannot have another channel consumer claim its files. */

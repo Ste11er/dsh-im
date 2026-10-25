@@ -557,3 +557,28 @@ test('sendMarkdownReply returns no deliveries for empty text', async () => {
   }, target, '');
   assert.deepEqual(results, []);
 });
+
+test('QQ connect timeout retries once with the identical request and sequence; ambiguous failures never retry', async () => {
+  const connectTimeout = () => new ApiError('Network error [/v2/groups/test/messages]: fetch failed | Connect Timeout Error (timeout: 10000ms)', 0, '/v2/groups/test/messages');
+  const calls = [];
+  await sendMarkdownReply({ send: async request => { calls.push(request); if (calls.length === 1) throw connectTimeout(); return { id: 'confirmed' }; } },
+    { scope: 'group', targetId: 'g', msgId: 'fresh' }, 'reply', { requireComplete: true });
+  assert.equal(calls.length, 2); assert.deepEqual(calls[0], calls[1]);
+  let attempts = 0;
+  await assert.rejects(sendMarkdownReply({ send: async () => { attempts++; throw connectTimeout(); } }, target, 'reply'),
+    error => error.code === 'qq-connect-timeout' && error.deliveryOutcome === 'failed' && error.errors.length === 2);
+  assert.equal(attempts, 2);
+  for (const message of ['Request timeout [/v2/users/test/messages]: exceeded 30000ms', 'Network error [/v2/users/test/messages]: socket closed', 'Failed to read response: fetch failed']) {
+    let count = 0; const error = new ApiError(message, 0, '/v2/users/test/messages');
+    await assert.rejects(sendMarkdownReply({ send: async () => { count++; throw error; } }, target, 'reply'), error);
+    assert.equal(count, 1);
+  }
+});
+
+test('cancellation after a connect timeout prevents the second send attempt', async () => {
+  const controller = new AbortController(); let count = 0;
+  await assert.rejects(sendMarkdownReply({ send: async () => {
+    count++; controller.abort(); throw new ApiError('Network error: Connect Timeout Error', 0, '/messages');
+  } }, target, 'reply', { signal: controller.signal }), error => error.name === 'AbortError');
+  assert.equal(count, 1);
+});

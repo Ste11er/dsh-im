@@ -1838,7 +1838,7 @@ export class HarnessClient {
     }
     // Advertise delivery only when this request can actually claim its files.
     const closeArtifactConsumer = typeof onArtifact === 'function'
-      ? outboundArtifactRegistry.openConsumer(sessionId, promptRpcId)
+      ? outboundArtifactRegistry.openConsumer(sessionId, promptRpcId, options.deliveryContext)
       : null;
 
     try {

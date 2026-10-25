@@ -1,4 +1,5 @@
 import { deferredStateAccess, normalizeDeferredState } from '../shared/deferred-state.mjs';
+import { parseSendControlUsage } from '../shared/send-control.mjs';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -24,6 +25,9 @@ function normalizeState(value) {
     seenMessageIds: Array.isArray(value.seenMessageIds)
       ? value.seenMessageIds.filter((id) => typeof id === 'string').slice(-1_000)
       : [],
+    ...(value.sendControlUsage
+      ? { sendControlUsage: parseSendControlUsage(value.sendControlUsage) }
+      : {}),
   };
 }
 
@@ -113,6 +117,17 @@ export class QqStateStore {
     if (this.#state.seenMessageIds.length > 1_000) {
       this.#state.seenMessageIds.splice(0, this.#state.seenMessageIds.length - 1_000);
     }
+    await this.#persist();
+  }
+
+  sendControlUsage() {
+    return parseSendControlUsage(this.#state.sendControlUsage);
+  }
+
+  async setSendControlUsage(usage) {
+    const normalized = parseSendControlUsage(usage);
+    if (normalized.events.length === 0) delete this.#state.sendControlUsage;
+    else this.#state.sendControlUsage = normalized;
     await this.#persist();
   }
 
