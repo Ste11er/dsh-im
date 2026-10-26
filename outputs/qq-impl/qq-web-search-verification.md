@@ -42,9 +42,11 @@
 | 实际模型与原生工具 | 独立公开测试 Agent 在自主回合策略下实际调用 `web_search`、`web_fetch`，两者 tool/result 均非错误，回合 completed，最终中文回答带 IANA 和 example.com 来源链接 |
 | 最终部署 | 无临时探针的 DSH PID 116182，QQ connected=true，无当前错误；原官方 Flash Off、1 秒冷却、人格和记忆设置保留 |
 | 群会话与配置 | config、workspaces、profile package 与部署前逐字一致，2 个 Session 绑定一致；用户期间独立保存的 profile 设置保留；只移除本次诊断挂载 |
-| 实际 QQ 群搜索回复 | 已请求用户发送新的不 @ 联网问题，仍待实群回执；独立模型验证不等于已验证 QQ 收件 |
+| 实际 QQ 群搜索回复 | 用户确认“测试完毕，没有问题”；同一群 Session 第 99 回合实际调用 web_search 成功，后续表情工具也成功，回合 completed；当前接收 6 条、回复 3 次，主动接话 2 次，错误 0 |
 
 独立 Agent 第一次测试装配错误，未通过注入 context 注册原生工具，工具报 `cannot get property "web" without inject`；此失败保留在私有 `agent-probe-initial.json`。修正测试装配为 agentCtx.inject 后重新运行，同一公开问题成功。该错误不是搜索后端不可用，也未被伪装成空结果。真实功能复用的是已正确声明依赖的原生 preset 工具。
+
+实群核对补充：部署前后群 Session 绑定一致，第 99–101 回合均 completed；成功搜索与最终收件已分别由日志和用户确认。第 99 回合的来源链接出现在工具前的中间文字，最后一条纯文字为配图说明，因此本轮不把“最终消息内来源链接呈现”列为实群通过项。私有记录在 `outputs/runtime/qq-web-search-final/live-search-verification.json`；未向外重放任何群内容。
 
 私有证据在 `outputs/runtime/qq-web-search/native-probe.json`、`agent-probe.json`，最终配置保留证据在 `outputs/runtime/qq-web-search-final/preservation.json`。临时模块和 profile 挂载均已清理；最终实例重启后没有这些诊断代码。所有测试只提交人工编写的公开查询，没有读取或回放私有群内容，也没有 Agent 向群发送测试消息。
 
