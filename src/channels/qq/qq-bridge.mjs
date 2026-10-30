@@ -1,4 +1,6 @@
+import { qqFamiliarityText } from './familiarity-context.mjs';
 import { qqReplyActivity } from './reply-activity.mjs';
+import { isQqComputerCommandOwner, qqComputerCommandOwners } from './computer-command-owner.mjs';
 import { QqGroupParticipation, qqGroupParticipation, PARTICIPATION_SKIP, PARTICIPATION_WAIT, qqGroupReplyExpired } from './group-participation.mjs';
 import { qqPersona } from './persona.mjs';
 import { qqStickersEnabled } from './sticker-config.mjs';
@@ -80,6 +82,7 @@ import {
   evaluateInboundAccess,
 } from '../shared/inbound-access.mjs';
 import { sendMarkdownReply } from './markdown-reply.mjs';
+import { QQ_IMAGE_DOWNLOAD_TIMEOUT_MS, isQqImageDownloadTimeout, withQqImageDownloadBudget } from './image-download.mjs';
 import {
   isQqMenuCommand, parseQqMenuCommand, QqMenuStore,
   qqMenuPage, qqMenuView, sendQqMenu,
@@ -436,6 +439,8 @@ export function createQqBridgeStatus() {
     messagesReceived: 0,
     messagesReplied: 0,
     messagesRejected: 0,
+    messagesDroppedImageTimeout: 0,
+    lastImageTimeoutAt: null,
     groupContextRecorded: 0,
     groupContextRejected: 0,
     artifactsSent: 0,
@@ -463,6 +468,7 @@ export function evaluateDeferredOutbound({
 export class QqHarnessBridge {
   #bot;
   #ownerUserOpenid;
+  #computerCommandOwners;
   #harness;
   #state;
   #deferred;
@@ -474,6 +480,8 @@ export class QqHarnessBridge {
   #participationSettings;
   #participationReply;
   #persona;
+  #familiarity;
+  #onGroupDecision;
   #stickersEnabled;
   #groupContextEnabled;
   #groupContext = new QqGroupContext();
@@ -485,6 +493,7 @@ export class QqHarnessBridge {
   #replyTimeoutMs;
   #signal;
   #fetchImpl;
+  #imageDownloadTimeoutMs;
   #fileUploadTimeoutMs;
   #queues = new Map();
   #busyMessages = new BusyMessageDispatcher();
@@ -502,6 +511,7 @@ export class QqHarnessBridge {
   constructor({
     bot,
     ownerUserOpenid,
+    computerCommandOwners,
     harness,
     state,
     contextEnhancement,
@@ -511,6 +521,8 @@ export class QqHarnessBridge {
     groupParticipation,
     participationReply = null,
     persona,
+    familiarity = null,
+    onGroupDecision = () => {},
     stickersEnabled = false,
     groupContextEnabled = false,
     groupMemory = null,
@@ -519,17 +531,23 @@ export class QqHarnessBridge {
     replyTimeoutMs = 600_000,
     signal,
     fetchImpl = fetch,
+    imageDownloadTimeoutMs = QQ_IMAGE_DOWNLOAD_TIMEOUT_MS,
     fileUploadTimeoutMs = DEFAULT_FILE_UPLOAD_TIMEOUT_MS,
   }) {
     if (!bot || typeof bot.sendText !== 'function') throw new TypeError('QQ bot client is required');
     if (!ownerUserOpenid) throw new TypeError('QQ scanner identity is required');
     if (!harness || !state) throw new TypeError('Harness client and state store are required');
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function');
+    if (!Number.isSafeInteger(imageDownloadTimeoutMs) || imageDownloadTimeoutMs <= 0) throw new TypeError('Invalid QQ image download timeout');
+    this.#imageDownloadTimeoutMs = imageDownloadTimeoutMs;
     if (!Number.isInteger(fileUploadTimeoutMs) || fileUploadTimeoutMs < 1) {
       throw new TypeError('fileUploadTimeoutMs must be a positive integer');
     }
     this.#bot = bot;
     this.#ownerUserOpenid = ownerUserOpenid;
+    const owners = qqComputerCommandOwners(computerCommandOwners, ownerUserOpenid);
+    this.#computerCommandOwners = owners?.direct !== undefined || ownerUserOpenid === '*'
+      ? owners : { ...owners, direct: ownerUserOpenid };
     this.#harness = harness;
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
@@ -542,6 +560,8 @@ export class QqHarnessBridge {
     this.#participation = new QqGroupParticipation({ signal, logger });
     this.#participation.set(this.#participationSettings);
     this.#persona = qqPersona(persona);
+    this.#familiarity = familiarity;
+    this.#onGroupDecision = onGroupDecision;
     this.#stickersEnabled = qqStickersEnabled(stickersEnabled);
     this.#groupContextEnabled = qqGroupContextEnabled(groupContextEnabled);
     this.#groupMemory = groupMemory;
@@ -629,6 +649,7 @@ export class QqHarnessBridge {
     }
     return this.#participation.consider(key, (signal, control) => qqReplyActivity.run(async () => {
       if (!this.#canParticipate(key, message) || qqGroupReplyExpired(message)) return;
+      this.#onGroupDecision(message.groupOpenid, 'assessing');
       const snapshot = this.#groupContext.snapshot(key);
       const maxImages = snapshot?.hasImages ? (await this.#harness.getImageInputLimits()).maxImages : 0;
       signal.throwIfAborted();
@@ -637,18 +658,32 @@ export class QqHarnessBridge {
       const { content } = utterance;
       // Share original bytes only for this assessment/reply. The group cache
       // keeps lazy references, so a later turn does not retain downloaded bytes.
-      const images = utterance.images.map(source => {
+      const images = withQqImageDownloadBudget(utterance.images.map(source => {
         if (source.data !== undefined) return source;
         let loaded;
         return { ...source, load: options => { loaded ??= source.load(options); return loaded; } };
-      });
+      }), { timeoutMs: this.#imageDownloadTimeoutMs });
       this.#harness.assertWorkspaceScope?.();
-      await this.#state.markSeen(message.messageId);
-      const deliveryContext = { channel: 'qq', conversationType: 'group', autonomous: true, autonomousSignal: signal, qqCapabilities: this.#capabilities(), persona: this.#persona, stickersEnabled: this.#stickersEnabled, memoryLookup: this.#memoryLookup(key, this.#groupMemory?.capture()) };
+      // Merely assessing a full-group event does not consume a possible later
+      // GROUP_AT_MESSAGE_CREATE for the same message. Consume only when this
+      // candidate actually takes ownership of a reply (including failed/unknown
+      // generation), so delivery retries can never execute it twice.
+      let replyClaimed = false;
+      const beginReply = async () => {
+        if (replyClaimed) return true;
+        if (this.#state.hasSeen(message.messageId) || !control.beginReply()) return false;
+        replyClaimed = true;
+        await this.#state.markSeen(message.messageId);
+        this.#onGroupDecision(message.groupOpenid, 'reply-started');
+        signal.throwIfAborted();
+        return true;
+      };
+      const deliveryContext = { ...this.#familiarityFor(message), channel: 'qq', conversationType: 'group', autonomous: true, autonomousSignal: signal, qqCapabilities: this.#capabilities(), persona: this.#persona, stickersEnabled: this.#stickersEnabled, memoryLookup: this.#memoryLookup(key, this.#groupMemory?.capture()),
+        ...(utterance.messages.length === 1 && !images.length && !qqReplyReference(message) ? { idiomInput: text } : {}) };
       const deliver = async ({ text: answer, artifacts }) => {
           signal.throwIfAborted();
           if (!this.#canParticipate(key, message)) return;
-          if (!control.beginReply()) return;
+          if (!await beginReply()) return;
           this.#groupContext.consumeUtterance(utterance);
           if (qqGroupReplyExpired(message)) {
             this.#logger.info?.('[dsh-im:qq] autonomous reply skipped: source message reply window expired during generation');
@@ -672,15 +707,17 @@ export class QqHarnessBridge {
           }
           this.#status.messagesReplied++; this.#status.lastReplyAt = new Date().toISOString();
           this.#recordGroupReply(key, message.messageId, answer, result.receipt);
+          this.#onGroupDecision(message.groupOpenid, 'replied');
           return result.receipt;
       };
-      const result = await this.#participationReply({ content, images, signal, deliveryContext,
+      let result;
+      try { result = await this.#participationReply({ content, images, signal, deliveryContext,
         cwd: this.#harness.currentConversationWorkspace?.(key) ?? this.#harness.currentWorkspace?.(),
         deliver,
         reply: async ({ imageDescription } = {}) => {
           signal.throwIfAborted();
           if (!this.#canParticipate(key, message)) return;
-          if (!control.beginReply()) return;
+          if (!await beginReply()) return;
           this.#groupContext.consumeUtterance(utterance);
           const replyContent = imageDescription === undefined ? content
             : [...(typeof content === 'string' ? [{ type: 'text', text: content }] : content),
@@ -700,8 +737,14 @@ export class QqHarnessBridge {
             if (!answer && !artifacts.length) throw new Error('QQ participation returned no reply');
             return await deliver({ text: answer, artifacts });
           } finally { for (const artifact of artifacts) releaseOutboundArtifact(artifact); }
-        } });
+        } }); }
+      catch (error) {
+        if (!isQqImageDownloadTimeout(error)) throw error;
+        this.#groupContext.consumeUtterance(utterance);
+        return this.#discardImageTimeout(message, key, utterance.images);
+      }
       signal.throwIfAborted();
+      if (result === PARTICIPATION_WAIT || result === null) this.#onGroupDecision(message.groupOpenid, result === PARTICIPATION_WAIT ? 'waiting' : 'declined');
       if (result !== PARTICIPATION_WAIT) this.#groupContext.consumeUtterance(utterance);
       return result;
     }), { coalesce: true });
@@ -711,7 +754,22 @@ export class QqHarnessBridge {
     if (!this.#groupContextEnabled) return;
     const sentImages = receipt?.artifacts?.filter(row => row.outcome === 'sent').length ?? 0;
     const content = [text, sentImages ? `[已发送 ${sentImages} 个图片/文件附件]` : ''].filter(Boolean).join('\n');
-    if (content) this.#groupContext.recordReply(key, { messageId, content });
+    if (content) {
+      this.#groupContext.recordReply(key, { messageId, content });
+      this.#onGroupDecision(key.slice('group:'.length), 'replied');
+    }
+  }
+
+  #familiarityFor(message, observe = false) {
+    if (!this.#familiarity) return {};
+    try {
+      if (observe) this.#familiarity.observe(message, isQqMessageAddressed(message));
+      const value = this.#familiarity.context(message);
+      return value ? { familiarity: value } : {};
+    } catch (error) {
+      this.#logger.error?.('[dsh-im:qq] familiarity observation failed:', error);
+      return { familiarity: { unavailable: true } };
+    }
   }
 
   setPersona(value) {
@@ -762,9 +820,11 @@ export class QqHarnessBridge {
     const messageId = nonEmptyString(message?.messageId);
     const sender = nonEmptyString(message?.senderId);
     if (!messageId || !sender || message?.senderIsBot === true
-      || !['c2c', 'group'].includes(message?.kind)
-      || this.#state.hasSeen(messageId)
-      || this.#acceptedMessageIds.has(messageId)) return Promise.resolve();
+      || !['c2c', 'group'].includes(message?.kind)) return Promise.resolve();
+    if (this.#state.hasSeen(messageId) || this.#acceptedMessageIds.has(messageId)) {
+      if (message.kind === 'group') this.#onGroupDecision(message.groupOpenid, 'duplicate');
+      return Promise.resolve();
+    }
     message = normalizeQqMentions(message, new Set([this.#bot.appId]));
     const key = conversationKey(message);
     const addressed = isQqMessageAddressed(message);
@@ -773,11 +833,15 @@ export class QqHarnessBridge {
     if (!addressed) {
       let contextRecorded = false;
       if (!isQqGroupContextMessage(message, this.#groupContextEnabled)
-        || !nonEmptyString(message.groupOpenid)) return Promise.resolve();
+        || !nonEmptyString(message.groupOpenid)) {
+        if (message.kind === 'group') this.#onGroupDecision(message.groupOpenid, 'context-off');
+        return Promise.resolve();
+      }
       const access = evaluateInboundAccess(this.#accessPolicy, {
         conversationType: 'group', senderIds: sender, isCommand: false,
       });
       if (!access.allowed) {
+        this.#onGroupDecision(message.groupOpenid, 'access-denied');
         this.#status.groupContextRejected += 1;
         this.#status.messagesRejected += 1;
         this.#status.lastRejectedAt = new Date().toISOString();
@@ -795,6 +859,8 @@ export class QqHarnessBridge {
         if (this.#groupContext.record(key, {
           messageId, senderId: sender, content: inbound.content, images: inbound.images,
         })) {
+          this.#onGroupDecision(message.groupOpenid, 'ambient-recorded');
+          this.#familiarityFor(message, true);
           contextRecorded = true;
           this.#status.groupContextRecorded += 1;
           this.#status.messagesReceived += 1;
@@ -830,6 +896,7 @@ export class QqHarnessBridge {
           ? { allowed: true, reason: 'legacy-owner' }
           : { allowed: false, reason: 'sender-not-allowed' };
       if (!access.allowed) {
+        if (message.kind === 'group') this.#onGroupDecision(message.groupOpenid, 'access-denied');
         this.#acceptedMessageIds.set(messageId, null);
         return this.#finishAccessDecision(message, messageId, access);
       }
@@ -838,9 +905,11 @@ export class QqHarnessBridge {
     const busy = this.#queues.has(key) || this.#participation.isReplying(key);
     if (message.kind === 'group' && busy && !commandText.trim().startsWith('/') && !numericMenu
       && !this.#approvals.hasPending(key) && !(awaiting && awaiting.actor === sender && !awaiting.submitting && !awaiting.claimedReplyMessageId)) {
+      this.#onGroupDecision(message.groupOpenid, 'busy-dropped');
       return this.#dropBusy(messageId);
     }
     if (message.kind === 'group') {
+      this.#onGroupDecision(message.groupOpenid, 'mention-accepted');
       this.#participation.cancel(key);
       this.#groupContext.consumeSpeaker(key, sender);
     }
@@ -1037,6 +1106,15 @@ export class QqHarnessBridge {
       this.#status.messagesDroppedBusy = (this.#status.messagesDroppedBusy ?? 0) + 1;
       return { outcome: 'dropped', reason: 'busy' };
     }).finally(() => this.#acceptedMessageIds.delete(messageId));
+  }
+
+  async #discardImageTimeout(message, key, images = []) {
+    this.#groupContext.discardImages(key, images, message.messageId);
+    await this.#state.markSeen(message.messageId);
+    this.#status.messagesDroppedImageTimeout = (this.#status.messagesDroppedImageTimeout ?? 0) + 1;
+    this.#status.lastImageTimeoutAt = new Date().toISOString();
+    if (message.kind === 'group') this.#onGroupDecision(message.groupOpenid, 'image-timeout-dropped');
+    this.#logger.info?.('[dsh-im:qq] inbound image download timed out; message discarded');
   }
 
   #enqueueMessage(message, messageId, key, {
@@ -1384,6 +1462,7 @@ export class QqHarnessBridge {
     const hasFiles = hasInboundFiles(promptMessage);
     const hasReply = hasReplyReference(promptMessage);
     let stream = null;
+    let attemptedImages = [];
     let batchSettled = batchSubmission === null;
     try {
       if (!text && !hasImages && !hasFiles && !hasReply) {
@@ -1451,6 +1530,7 @@ export class QqHarnessBridge {
         : undefined;
       const originalContent = content ?? text;
       content = originalContent;
+      const familiarityContext = this.#familiarityFor(message, true);
       let contextImages = [];
       if (this.#groupContextEnabled) {
         const contextSnapshot = message[groupContextSnapshot];
@@ -1465,7 +1545,9 @@ export class QqHarnessBridge {
         contextImages = prepared.images;
       }
       if (message.kind === 'group' && this.#groupMemory && message[groupMemorySnapshot] !== undefined) {
-        const history = this.#groupMemory.overview(key, text, message[groupMemorySnapshot]);
+        const history = this.#groupMemory.overview(key, text, message[groupMemorySnapshot], {
+          maxBytes: 1200 - Buffer.byteLength(qqFamiliarityText(familiarityContext.familiarity)),
+        });
         if (history) content = typeof content === 'string'
           ? `${history}\n\n${content}` : [{ type: 'text', text: history }, ...content];
       }
@@ -1486,6 +1568,8 @@ export class QqHarnessBridge {
       const toolErrors = [];
       let answer;
       let artifacts = [];
+      attemptedImages = [...promptMessage.images, ...contextImages];
+      const boundedImages = withQqImageDownloadBudget(attemptedImages, { timeoutMs: this.#imageDownloadTimeoutMs });
       try {
         // Persist consumption before handing the prompt to Harness. Provider
         // redelivery after a failed error notice must never execute it twice.
@@ -1507,7 +1591,8 @@ export class QqHarnessBridge {
           createOptions: { signal: this.#signal },
           existsOptions: { signal: this.#signal },
           askOptions: {
-            deliveryContext: { qqCapabilities: this.#capabilities(), persona: this.#persona, channel: 'qq', conversationType: message.kind === 'group' ? 'group' : 'direct', stickersEnabled: this.#stickersEnabled, ...(message.kind === 'group' && this.#groupMemory ? { memoryLookup: this.#memoryLookup(key, message[groupMemorySnapshot]) } : {}) },
+            deliveryContext: { ...familiarityContext, qqCapabilities: this.#capabilities(), persona: this.#persona, channel: 'qq', conversationType: message.kind === 'group' ? 'group' : 'direct', computerCommandAuthorized: isQqComputerCommandOwner(this.#computerCommandOwners, message.kind === 'group' ? 'group' : 'direct', sender), stickersEnabled: this.#stickersEnabled, ...(message.kind === 'group' && this.#groupMemory ? { memoryLookup: this.#memoryLookup(key, message[groupMemorySnapshot]) } : {}),
+              ...(!hasImages && !hasFiles && !hasReply && !batchSubmission ? { idiomInput: text } : {}) },
             timeoutMs: this.#replyTimeoutMs,
             signal: this.#signal,
             control: { owner: this, key },
@@ -1532,7 +1617,7 @@ export class QqHarnessBridge {
             }),
             onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
             files: promptMessage.files,
-            images: [...promptMessage.images, ...contextImages],
+            images: boundedImages,
           },
         }));
         if (batchSubmission) {
@@ -1635,6 +1720,7 @@ export class QqHarnessBridge {
         this.#logger.warn?.('[dsh-im:qq] unable to cancel a failed QQ stream:', streamError);
       }
       if (this.#signal?.aborted) return;
+      if (isQqImageDownloadTimeout(error)) return this.#discardImageTimeout(message, key, attemptedImages);
       this.#status.lastError = error?.message ?? String(error);
       const userMessage = inboundFileUserMessage(error)
         ?? imagePromptUserMessage(error);

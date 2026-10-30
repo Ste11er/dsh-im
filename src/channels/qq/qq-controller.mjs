@@ -1,4 +1,5 @@
 import { qqGroupParticipation } from './group-participation.mjs';
+import { qqFamiliarityEnabled } from './familiarity.mjs';
 import { qqPersona } from './persona.mjs';
 import { qqStickersEnabled } from './sticker-config.mjs';
 import { extractConnectionEvidence, atConnectionStage, createConnectionDiagnostics } from '../shared/connection-error.mjs';
@@ -114,7 +115,10 @@ export class QqController {
     if (this.#closed) return this.status();
     for (const config of this.#configStore.list()) {
       await this.#withBotTransition(config.botId, async () => {
-        if (this.#closed || this.#runtimes.get(config.botId)?.status?.ready) return;
+        const current = this.#runtimes.get(config.botId)?.status;
+        // The SDK owns reconnect/backoff until it finishes or exhausts. A
+        // supervisor pass must not reset that budget (especially rate limits).
+        if (this.#closed || current?.ready || current?.gatewayTransport?.recovering === true) return;
         try {
           const appSecret = await this.#resolveSecret(config.secretRef);
           if (!appSecret) {
@@ -233,11 +237,13 @@ export class QqController {
         appId: normalizedAppId,
         secretRef: identity.secretRef,
         ownerUserOpenid: previousConfig?.ownerUserOpenid ?? '*',
+        ...(previousConfig?.computerCommandOwners === undefined ? {} : { computerCommandOwners: previousConfig.computerCommandOwners }),
         createdAt: previousConfig?.createdAt ?? new Date().toISOString(),
         connectedAt: new Date().toISOString(),
         // Rebinding credentials never silently resumes a paused account.
         ...(previousConfig?.paused === true ? { paused: true } : {}),
         ...(previousConfig?.groupParticipation === undefined ? {} : { groupParticipation: previousConfig.groupParticipation }),
+        ...(previousConfig?.familiarityEnabled === true ? { familiarityEnabled: true } : {}),
         ...(previousConfig?.persona === undefined ? {} : { persona: previousConfig.persona }),
         ...(previousConfig?.stickersEnabled === true ? { stickersEnabled: true } : {}),
         ...(previousConfig?.groupContextEnabled === true ? { groupContextEnabled: true } : {}),
@@ -423,6 +429,44 @@ export class QqController {
     });
   }
 
+  async setFamiliarityEnabled(botId, value) {
+    const enabled = qqFamiliarityEnabled(value);
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      const runtime = this.#runtimes.get(botId);
+      if (!runtime) throw new Error('QQ 机器人尚未连接，无法应用熟识度设置。');
+      if (enabled) runtime.prepareFamiliarity();
+      const next = { ...current };
+      if (enabled) next.familiarityEnabled = true;
+      else delete next.familiarityEnabled;
+      await atConnectionStage('account.save', () => this.#configStore.save(next), 'account-config');
+      runtime.setFamiliarityEnabled(enabled);
+      this.#touch();
+      return this.status();
+    });
+  }
+
+  async listFamiliarity(botId, options) {
+    return this.#withBotTransition(botId, () => {
+      if (!this.#configStore.get(botId)) throw new Error('Unknown QQ bot');
+      const runtime = this.#runtimes.get(botId);
+      if (!runtime) throw new Error('QQ 机器人尚未连接，无法查看熟识度。');
+      return runtime.listFamiliarity(options);
+    });
+  }
+
+  async clearFamiliarity(botId, id) {
+    return this.#withBotTransition(botId, () => {
+      if (!this.#configStore.get(botId)) throw new Error('Unknown QQ bot');
+      const runtime = this.#runtimes.get(botId);
+      if (!runtime) throw new Error('QQ 机器人尚未连接，无法清除熟识度。');
+      const result = runtime.clearFamiliarity(id);
+      this.#touch();
+      return result;
+    });
+  }
+
   async setGroupContextEnabled(botId, value) {
     const enabled = qqGroupContextEnabled(value);
     return this.#withBotTransition(botId, async () => {
@@ -560,7 +604,11 @@ export class QqController {
         sendControl: normalizeSendControl(config.sendControl),
         groupParticipation: qqGroupParticipation(config.groupParticipation),
         participationStats: runtimeStatus?.participationStats ?? null,
+        groupReception: runtimeStatus?.groupReception ?? [],
+        gatewayTransport: runtimeStatus?.gatewayTransport ?? null,
         persona: qqPersona(config.persona),
+        familiarityEnabled: qqFamiliarityEnabled(config.familiarityEnabled),
+        familiarity: runtimeStatus?.familiarity ?? null,
         stickersEnabled: qqStickersEnabled(config.stickersEnabled),
         groupContextEnabled: qqGroupContextEnabled(config.groupContextEnabled),
         groupMemoryEnabled: qqGroupMemoryEnabled(config.groupMemoryEnabled),
@@ -582,6 +630,7 @@ export class QqController {
         stats: {
           messagesReceived: runtimeStatus?.messagesReceived ?? 0,
           messagesReplied: runtimeStatus?.messagesReplied ?? 0,
+          messagesDroppedImageTimeout: runtimeStatus?.messagesDroppedImageTimeout ?? 0,
         },
         lastMessageError: publicMessageFailure(runtimeStatus?.lastMessageError),
         error: structuredClone(runtimeStatus?.error ?? this.#errors.get(config.botId) ?? null),
@@ -652,12 +701,17 @@ export class QqController {
       appId,
       secretRef: identity.secretRef,
       ownerUserOpenid,
+      // A QR rescan can change the account owner. Keep mapped group identities
+      // only when the confirmed direct identity still matches the new scanner.
+      ...(previousConfig?.computerCommandOwners?.direct === ownerUserOpenid
+        ? { computerCommandOwners: previousConfig.computerCommandOwners } : {}),
       createdAt: previousConfig?.createdAt ?? new Date().toISOString(),
       connectedAt: new Date().toISOString(),
       // A rescan keeps the existing pause decision; resuming stays explicit.
       ...(previousConfig?.paused === true ? { paused: true } : {}),
       ...(previousConfig?.groupParticipation === undefined ? {} : { groupParticipation: previousConfig.groupParticipation }),
-      ...(previousConfig?.persona === undefined ? {} : { persona: previousConfig.persona }),
+      ...(previousConfig?.familiarityEnabled === true ? { familiarityEnabled: true } : {}),
+        ...(previousConfig?.persona === undefined ? {} : { persona: previousConfig.persona }),
       ...(previousConfig?.stickersEnabled === true ? { stickersEnabled: true } : {}),
       ...(previousConfig?.groupContextEnabled === true ? { groupContextEnabled: true } : {}),
       ...(previousConfig?.groupMemoryEnabled === true ? { groupMemoryEnabled: true } : {}),

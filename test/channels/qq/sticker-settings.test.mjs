@@ -130,7 +130,7 @@ test('QQ stickers runtime seeds and applies the switch without restarting', asyn
   const { qqCapabilities, ...delivery } = requests[0];
   assert.equal(qqCapabilities.groupParticipationImplemented, true);
   assert.equal(qqCapabilities.groupParticipationEnabled, false);
-  assert.deepEqual(delivery, { persona: qqPersona(), channel: 'qq', conversationType: 'group', stickersEnabled: true });
+  assert.deepEqual(delivery, { persona: qqPersona(), channel: 'qq', conversationType: 'group', computerCommandAuthorized: false, stickersEnabled: true, idiomInput: 'hi' });
   runtime.setStickersEnabled(false);
   await emit('two');
   assert.equal(requests[1].stickersEnabled, false);

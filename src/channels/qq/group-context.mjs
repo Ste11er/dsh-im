@@ -130,6 +130,18 @@ export class QqGroupContext {
     if (utterance) this.consumeUtterance(utterance);
   }
 
+  discardImages(key, images, messageId) {
+    const discarded = new Set(images);
+    for (const row of this.#groups.get(key) ?? []) {
+      const keep = row.messageId === messageId ? [] : row.images.filter(image => !discarded.has(image));
+      const count = row.images.length - keep.length;
+      if (!count) continue;
+      row.images = keep;
+      row.data = { ...row.data, discardedImages: (row.data.discardedImages ?? 0) + count };
+      if (row.messageId === messageId || (!row.images.length && !row.data.text)) row.handled = true;
+    }
+  }
+
   prepare(snapshot, content, { now = Date.now(), maxImages = 0, imageOffset = 0 } = {}) {
     if (!snapshot || snapshot.generation !== this.#generation
       || this.#groups.get(snapshot.key) !== snapshot.source) return { content, images: [] };

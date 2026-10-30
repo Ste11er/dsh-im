@@ -13,6 +13,21 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('supervisor respects a live gateway reconnect budget without presenting the bot as connected', async t => {
+  const config = { botId: 'qq_test', appId: 'app', secretRef: 'fixture', ownerUserOpenid: 'owner' };
+  let creates = 0, starts = 0;
+  const live = { ready: true, harnessReachable: true, qqConnectionState: 'connected', gatewayTransport: { state: 'connected', recovering: false } };
+  const controller = new QqController({ qrAuth: { start() { return () => {}; } }, credentials: { resolve: async () => ({ value: 'fixture' }), set: async () => {}, unset: async () => {} },
+    configStore: { list: () => [config], get: () => config, save: async () => {}, remove: async () => null },
+    createRuntime: () => { creates++; return { get status() { return live; }, start: async () => { starts++; }, stop: async () => {} }; } });
+  t.after(() => controller.close()); await controller.initialize();
+  Object.assign(live, { ready: false, qqConnectionState: 'connecting', gatewayTransport: { state: 'reconnecting', recovering: true } });
+  await controller.initialize();
+  assert.equal(creates, 1); assert.equal(starts, 1);
+  assert.equal(controller.status().bots[0].connected, false);
+  assert.equal(controller.status().bots[0].gatewayTransport.state, 'reconnecting');
+});
+
 test('QQ QR success stores the secret off-config and starts a scanner-owned runtime', async () => {
   const qr = deferred();
   let callbacks;

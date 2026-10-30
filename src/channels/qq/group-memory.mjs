@@ -229,8 +229,9 @@ export class QqGroupMemory {
     throw error;
   }
 
-  overview(key, question, cutoff = Number.MAX_SAFE_INTEGER) {
+  overview(key, question, cutoff = Number.MAX_SAFE_INTEGER, { maxBytes = 1200 } = {}) {
     if (!this.#enabled) return null;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1200) throw new TypeError('Invalid memory overview byte budget');
     const queryTerms = terms(question).slice(0, 32);
     const match = queryTerms.map(word => `"${word.replaceAll('"', '""')}"`).join(' OR ');
     const row = match ? this.#db.prepare(`SELECT s.* FROM summary_search JOIN summaries s ON s.id=summary_search.rowid
@@ -238,7 +239,8 @@ export class QqGroupMemory {
     const counts = this.#db.prepare('SELECT count(*) count FROM summaries WHERE group_key=? AND to_seq<=?').get(key, cutoff);
     const data = { overview: row ? relevantText(row.text, queryTerms).text : '本群历史可按需查询；普通闲聊无需查询。',
       summaryId: row?.id ?? null, summaryCount: counts.count, truncated: Boolean(row), lookupTool: 'dsh_qq_memory' };
-    while (Buffer.byteLength(frame(data)) > 1200) data.overview = [...data.overview].slice(0, -1).join('');
+    if (Buffer.byteLength(frame({ ...data, overview: '' })) > maxBytes) throw new RangeError('Memory overview budget cannot hold its reference metadata');
+    while (Buffer.byteLength(frame(data)) > maxBytes) data.overview = [...data.overview].slice(0, -1).join('');
     return frame(data);
   }
 

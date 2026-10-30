@@ -1,6 +1,8 @@
+import { installIdiomGame } from './idiom-game-tool.mjs';
 import { installQqCapabilitiesContext } from './channels/qq/capabilities-context.mjs';
 import { installQqMemoryTool } from './channels/qq/memory-tool.mjs';
 import { installQqWebContext } from './channels/qq/web-context.mjs';
+import { installQqFamiliarityContext } from './channels/qq/familiarity-context.mjs';
 import { installQqPersonaContext } from './channels/qq/persona-context.mjs';
 import { apply as applyDingtalk } from './channels/dingtalk/index.mjs';
 import { apply as applyDiscord } from './channels/discord/index.mjs';
@@ -19,6 +21,7 @@ import { apply as applyMatrix } from './channels/matrix/index.mjs';
 import { installOutboundArtifactTool } from '../../src/channels/shared/semantic/artifact.mjs';
 import { installQqStickerTool } from './channels/qq/sticker-tool.mjs';
 import { installQqParticipationPolicy } from './channels/qq/participation-policy.mjs';
+import { installQqComputerCommandPolicy } from './channels/qq/computer-command-policy.mjs';
 import { installHostLanguage } from './host-language.mjs';
 import { installHostLanguageRpc } from './host-language-rpc.mjs';
 import { installDeliveryRpc } from './delivery-rpc.mjs';
@@ -155,19 +158,25 @@ export function createImHostPlugin(internals = {}) {
         installOutboundArtifactTool(artifactCtx);
         installQqStickerTool(artifactCtx, { config: config.qq ?? {} });
         installQqPersonaContext(artifactCtx);
+        installQqFamiliarityContext(artifactCtx);
+        installIdiomGame(artifactCtx);
         installQqCapabilitiesContext(artifactCtx);
         installQqMemoryTool(artifactCtx);
         installQqWebContext(artifactCtx);
         installQqParticipationPolicy(artifactCtx);
+        installQqComputerCommandPolicy(artifactCtx);
       });
     } else {
       installOutboundArtifactTool(ctx);
       installQqStickerTool(ctx, { config: config.qq ?? {} });
       installQqPersonaContext(ctx);
+      installQqFamiliarityContext(ctx);
+      installIdiomGame(ctx);
       installQqCapabilitiesContext(ctx);
       installQqMemoryTool(ctx);
       installQqWebContext(ctx);
       installQqParticipationPolicy(ctx);
+      installQqComputerCommandPolicy(ctx);
     }
     const logger = typeof ctx?.logger === 'function'
       ? ctx.logger(name)

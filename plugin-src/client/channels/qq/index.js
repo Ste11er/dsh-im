@@ -1,4 +1,6 @@
 import { ParticipationEditor } from './participation-editor.js';
+import { FamiliarityEditor } from './familiarity-editor.js';
+import { GroupReceptionStatus } from './reception-status.js';
 import { PersonaEditor } from './persona-editor.js';
 import { ConnectionError, normalizeConnectionError } from '../../connection-error.js';
 import { BotName } from '../../bot-alias.js';
@@ -347,6 +349,9 @@ export function AccountCard({
   onSendControlSave,
   onParticipationSave,
   onPersonaSave,
+  onFamiliarityChange,
+  onFamiliarityList,
+  onFamiliarityClear,
   onStickersChange,
   onGroupContextChange,
   onGroupMemoryChange,
@@ -422,7 +427,9 @@ export function AccountCard({
         onSave: onSendControlSave,
       }),
       h(ParticipationEditor, { settings: account.groupParticipation, contextEnabled: account.groupContextEnabled, stats: account.participationStats, disabled: Boolean(busy), onSave: onParticipationSave }),
+      h(GroupReceptionStatus, { groups: account.groupReception }),
       h(PersonaEditor, { persona: account.persona, disabled: Boolean(busy), onSave: onPersonaSave }),
+      h(FamiliarityEditor, { enabled: account.familiarityEnabled, status: account.familiarity, disabled: Boolean(busy), onChange: onFamiliarityChange, onList: onFamiliarityList, onClear: onFamiliarityClear }),
       h(StickersToggle, { enabled: account.stickersEnabled, disabled: Boolean(busy), onChange: onStickersChange }),
       h(GroupContextToggle, {
         enabled: account.groupContextEnabled,
@@ -755,6 +762,9 @@ export function QqSettingsTab({ rpcCall }) {
             ),
             onParticipationSave: settings => botAction(account, 'group-participation', QQ_ENDPOINTS.setGroupParticipation, { botId: account.botId, settings }),
             onPersonaSave: persona => botAction(account, 'persona', QQ_ENDPOINTS.setPersona, { botId: account.botId, persona }),
+            onFamiliarityChange: enabled => botAction(account, 'familiarity', QQ_ENDPOINTS.setFamiliarity, { botId: account.botId, enabled }),
+            onFamiliarityList: offset => invoke(QQ_ENDPOINTS.listFamiliarity, { botId: account.botId, offset }),
+            onFamiliarityClear: async id => { const result = await invoke(QQ_ENDPOINTS.clearFamiliarity, { botId: account.botId, id }); await loadStatus(); return result; },
             onStickersChange: (enabled) => botAction(account, 'stickers', QQ_ENDPOINTS.setStickers, { botId: account.botId, enabled }),
             onGroupContextChange: (enabled) => botAction(
               account, 'group-context', QQ_ENDPOINTS.setGroupContext,

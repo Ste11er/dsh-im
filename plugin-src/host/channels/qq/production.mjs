@@ -10,6 +10,7 @@ import { QqController } from '../../../../src/channels/qq/qq-controller.mjs';
 import { QqRuntime } from '../../../../src/channels/qq/qq-runtime.mjs';
 import { QqQrAuth } from '../../../../src/channels/qq/qr-auth.mjs';
 import { QqStateStore } from '../../../../src/channels/qq/state-store.mjs';
+import { QqFamiliarity } from '../../../../src/channels/qq/familiarity.mjs';
 import { QqGroupMemory } from '../../../../src/channels/qq/group-memory.mjs';
 import { createGroupMemorySummarizer } from './group-memory-summary.mjs';
 import { createGroupImageDescriber } from './group-image-description.mjs';
@@ -158,6 +159,7 @@ export async function createProductionController(ctx, config = {}, internals = {
           selectedJudgeModel: () => configStore.get(botId).groupParticipation?.judgeModel ?? null,
           getImageSettings, describeImages,
         }),
+        familiarity: new QqFamiliarity({ path: resolve(paths.bots, botId, 'familiarity.sqlite') }),
         groupMemory: new QqGroupMemory({
           path: resolve(paths.bots, botId, 'group-memory.sqlite'),
           summarize: createGroupMemorySummarizer(ctx, () => configStore.get(botId).groupMemoryModels?.text ?? workspaces.modelFor(botId)),
@@ -193,6 +195,8 @@ export async function createProductionController(ctx, config = {}, internals = {
       // deleteBot stops the runtime before this cleanup. Disabling memory
       // retains archives; explicitly removing the bot removes its own archive.
       for (const suffix of ['', '-wal', '-shm']) {
+        try { await unlink(resolve(paths.bots, botId, `familiarity.sqlite${suffix}`)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
         try { await unlink(resolve(paths.bots, botId, `group-memory.sqlite${suffix}`)); }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
       }

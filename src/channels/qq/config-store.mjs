@@ -1,4 +1,6 @@
 import { qqGroupParticipation } from './group-participation.mjs';
+import { qqComputerCommandOwners } from './computer-command-owner.mjs';
+import { qqFamiliarityEnabled } from './familiarity.mjs';
 import { qqPersona } from './persona.mjs';
 import { qqStickersEnabled } from './sticker-config.mjs';
 import { createHash } from 'node:crypto';
@@ -57,6 +59,7 @@ function normalizeBot(value) {
     appId,
     secretRef,
     ownerUserOpenid,
+    ...(value.computerCommandOwners === undefined ? {} : { computerCommandOwners: qqComputerCommandOwners(value.computerCommandOwners, ownerUserOpenid) }),
     createdAt: cleanString(value.createdAt) ?? new Date().toISOString(),
     connectedAt: cleanString(value.connectedAt),
     // Account-level pause (WG-QQ-03). Only an explicit true is persisted:
@@ -64,6 +67,7 @@ function normalizeBot(value) {
     // exact document shape they had before this feature existed.
     ...(value.paused === true ? { paused: true } : {}),
     ...(value.groupParticipation === undefined ? {} : { groupParticipation: qqGroupParticipation(value.groupParticipation) }),
+    ...(qqFamiliarityEnabled(value.familiarityEnabled) ? { familiarityEnabled: true } : {}),
     ...(value.persona === undefined ? {} : { persona: qqPersona(value.persona) }),
     ...(qqStickersEnabled(value.stickersEnabled) ? { stickersEnabled: true } : {}),
     ...(qqGroupContextEnabled(value.groupContextEnabled) ? { groupContextEnabled: true } : {}),

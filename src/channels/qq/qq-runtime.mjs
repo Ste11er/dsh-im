@@ -1,8 +1,11 @@
+import { QqGroupReception } from './group-reception.mjs';
 import { qqGroupParticipation } from './group-participation.mjs';
+import { qqFamiliarityEnabled } from './familiarity.mjs';
 import { qqPersona } from './persona.mjs';
 import { qqStickersEnabled } from './sticker-config.mjs';
 import { extractConnectionEvidence, createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
-import { QQBot, contentSanitizer, typingIndicator } from '@tencent-connect/qqbot-nodejs';
+import { contentSanitizer, typingIndicator } from '@tencent-connect/qqbot-nodejs';
+import { QqConnectedBot } from './gateway-connection.mjs';
 
 import {
   connectionTestTarget,
@@ -36,6 +39,7 @@ export function createQqRuntimeStatus() {
     lastCheckedAt: null,
     lastConnectedAt: null,
     lastError: null,
+    gatewayTransport: null,
     ...createQqBridgeStatus(),
   };
 }
@@ -60,6 +64,8 @@ export class QqRuntime {
   #groupParticipation;
   #participationReply;
   #persona;
+  #familiarity;
+  #familiarityEnabled;
   #stickersEnabled;
   #groupContextEnabled;
   #groupMemory;
@@ -76,6 +82,7 @@ export class QqRuntime {
   #status = createQqRuntimeStatus();
   #bot = null;
   #bridge = null;
+  #groupReception = new QqGroupReception();
   #abortController = null;
   #runTask = null;
   #starting = null;
@@ -91,10 +98,11 @@ export class QqRuntime {
     sendControl,
     participationReply = null,
     groupMemory = null,
+    familiarity = null,
     logger = console,
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 20_000,
-    createBot = (options) => new QQBot(options),
+    createBot = (options) => new QqConnectedBot(options),
     typingMiddleware = typingIndicator,
   }) {
     if (!config || !appSecret || !harness || !state) {
@@ -115,6 +123,9 @@ export class QqRuntime {
     this.#participationReply = participationReply;
     if (this.#groupParticipation.enabled && typeof participationReply !== 'function') throw new TypeError('Participation Agent unavailable');
     this.#persona = qqPersona(config.persona);
+    this.#familiarity = familiarity;
+    this.#familiarityEnabled = qqFamiliarityEnabled(config.familiarityEnabled);
+    if (this.#familiarityEnabled && !familiarity) throw new TypeError('QQ familiarity store is unavailable');
     this.#stickersEnabled = qqStickersEnabled(config.stickersEnabled);
     this.#groupContextEnabled = qqGroupContextEnabled(config.groupContextEnabled);
     this.#groupMemoryEnabled = qqGroupMemoryEnabled(config.groupMemoryEnabled);
@@ -129,7 +140,7 @@ export class QqRuntime {
 
   get status() {
     const memory = this.#groupMemory?.status ?? null;
-    return structuredClone({ ...this.#status, participationStats: this.#bridge?.participationStats ?? null, groupMemory: memory
+    return structuredClone({ ...this.#status, groupReception: this.#groupReception.status, familiarity: this.#familiarity?.status ?? null, participationStats: this.#bridge?.participationStats ?? null, groupMemory: memory
       ? { ...memory, lastError: this.#status.groupMemoryError ?? memory.lastError } : null });
   }
 
@@ -191,6 +202,19 @@ export class QqRuntime {
     this.#groupParticipation = settings;
     this.#bridge?.setGroupParticipation(settings);
   }
+
+  prepareFamiliarity() {
+    if (!this.#familiarity) throw new Error('QQ 熟识度存储不可用。');
+    this.#familiarity.prepare();
+  }
+  setFamiliarityEnabled(value) {
+    const enabled = qqFamiliarityEnabled(value);
+    if (!this.#familiarity) throw new Error('QQ 熟识度存储不可用。');
+    this.#familiarity.setEnabled(enabled);
+    this.#familiarityEnabled = enabled;
+  }
+  listFamiliarity(options) { this.prepareFamiliarity(); return this.#familiarity.list(options); }
+  clearFamiliarity(id) { this.prepareFamiliarity(); return this.#familiarity.clear(id); }
 
   setPersona(value) {
     this.#persona = qqPersona(value);
@@ -357,8 +381,10 @@ export class QqRuntime {
 
   async #start() {
     await this.stop();
+    this.#groupReception = new QqGroupReception();
     this.#startSendControlTimer();
     this.#status.startedAt = new Date().toISOString();
+    this.#status.gatewayTransport = null;
     this.#status.qqConnectionState = 'connecting';
     this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
     await atConnectionStage('harness.check', () => this.#harness.ensureRunning());
@@ -377,6 +403,18 @@ export class QqRuntime {
       logger: sdkLogger,
       transport: 'websocket',
       tokenPrefetch: 'sync',
+      connectTimeoutMs: this.#connectTimeoutMs,
+      onConnectionState: health => {
+        if (this.#bot !== bot || controller.signal.aborted) return;
+        this.#status.gatewayTransport = health;
+        this.#status.lastCheckedAt = Date.now();
+        if (health.state !== 'connected') {
+          this.#status.ready = false;
+          this.#status.qqConnectionState = health.state === 'failed' ? 'failed' : 'connecting';
+          this.#status.lastError = health.state === 'failed' ? 'QQ 网关连接失败，等待连接管理器重试。'
+            : health.disconnectReason ? 'QQ 网关连接中断，正在重新连接。' : null;
+        }
+      },
       // sendText is reserved for literal notices/connection tests. Markdown
       // replies use the explicit msg_type=2 path in sendMarkdownReply().
       markdownSupport: false,
@@ -389,9 +427,15 @@ export class QqRuntime {
     this.#bot = bot;
     try { this.#applyGroupMemory(); }
     catch (error) { await this.stop(); throw error; }
+    // Isolate local relationship-store failure: normal QQ chat can still run,
+    // while the settings status reports the feature as unavailable.
+    try { this.#familiarity?.setEnabled(this.#familiarityEnabled); }
+    catch (error) { this.#logger.error?.('[dsh-im:qq] familiarity initialization failed:', error); }
     this.#bridge = new QqHarnessBridge({
       bot,
+      onGroupDecision: (groupId, stage) => this.#groupReception.decision(groupId, stage),
       ownerUserOpenid: this.#config.ownerUserOpenid,
+      computerCommandOwners: this.#config.computerCommandOwners,
       harness: this.#harness,
       state: this.#state,
       contextEnhancement: this.#contextEnhancement,
@@ -402,6 +446,7 @@ export class QqRuntime {
       groupParticipation: this.#groupParticipation,
       participationReply: this.#participationReply,
       persona: this.#persona,
+      familiarity: this.#familiarity,
       stickersEnabled: this.#stickersEnabled,
       groupContextEnabled: this.#groupContextEnabled,
       groupMemory: this.#groupMemoryEnabled && this.#groupContextEnabled ? this.#groupMemory : null,
@@ -411,7 +456,11 @@ export class QqRuntime {
     });
     const botMentionIds = new Set([this.#config.appId]);
     bot.use(async (ctx, next) => {
+      // The SDK does not emit rawEvent for parsed message events. Count the
+      // preserved event type before normalization/sanitization at this entry.
+      this.#groupReception.gateway({ eventType: ctx.message.rawEventType, data: { group_openid: ctx.message.groupOpenid } });
       ctx.message = normalizeQqMentions(ctx.message, botMentionIds);
+      this.#groupReception.processed(ctx.message, isQqMessageAddressed(ctx.message));
       await next();
     });
     // QQ delivers emoji/face messages as opaque `<faceType=..,faceId="..",ext="..">`
@@ -536,6 +585,7 @@ export class QqRuntime {
     ]);
     await bridge?.waitForIdle();
     await this.#groupMemory?.close();
+    this.#familiarity?.close();
     this.#status.ready = false;
     this.#status.qqConnectionState = 'idle';
     return this.status;

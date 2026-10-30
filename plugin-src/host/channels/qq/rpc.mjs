@@ -47,6 +47,9 @@ export const QQ_ENDPOINTS = Object.freeze({
   setGroupContext: SET_GROUP_CONTEXT_ENDPOINT,
   setGroupParticipation: 'bot.group-participation.set',
   setPersona: 'bot.persona.set',
+  setFamiliarity: 'bot.familiarity.set',
+  listFamiliarity: 'bot.familiarity.list',
+  clearFamiliarity: 'bot.familiarity.clear',
   setStickers: 'bot.stickers.set',
   setGroupMemory: 'bot.group-memory.set',
   setGroupMemoryModel: 'bot.group-memory.model.set',
@@ -144,10 +147,20 @@ function payloadFailure(endpoint, payload) {
       && isRecord(payload.sendControl)
       ? null : 'bot.send-control.set requires a botId and a sendControl object.';
   }
-  if ([QQ_ENDPOINTS.setGroupContext, QQ_ENDPOINTS.setGroupMemory, QQ_ENDPOINTS.setStickers].includes(endpoint)) {
+  if ([QQ_ENDPOINTS.setGroupContext, QQ_ENDPOINTS.setGroupMemory, QQ_ENDPOINTS.setStickers, QQ_ENDPOINTS.setFamiliarity].includes(endpoint)) {
     return exactKeys(payload, ['botId', 'enabled']) && validId(payload.botId)
       && typeof payload.enabled === 'boolean'
       ? null : 'bot.group-context.set requires a botId and a boolean enabled.';
+  }
+  if (endpoint === QQ_ENDPOINTS.listFamiliarity) {
+    return exactKeys(payload, ['botId', 'offset']) && validId(payload.botId)
+      && (payload.offset === undefined || (Number.isSafeInteger(payload.offset) && payload.offset >= 0))
+      ? null : '请提交有效的熟识度分页参数。';
+  }
+  if (endpoint === QQ_ENDPOINTS.clearFamiliarity) {
+    return exactKeys(payload, ['botId', 'id']) && validId(payload.botId)
+      && typeof payload.id === 'string' && /^[a-f0-9]{64}$/.test(payload.id)
+      ? null : '请提交有效的熟识度记录编号。';
   }
   if (endpoint === QQ_ENDPOINTS.setGroupParticipation) {
     try {
@@ -315,6 +328,12 @@ export function createQqRpcHandler(controller, { encodeQr = qrDataUrl } = {}) {
         value = await publicStatus(await controller.setGroupParticipation(payload.botId, payload.settings), cachedEncode);
       } else if (endpoint === QQ_ENDPOINTS.setPersona) {
         value = await publicStatus(await controller.setPersona(payload.botId, payload.persona), cachedEncode);
+      } else if (endpoint === QQ_ENDPOINTS.setFamiliarity) {
+        value = await publicStatus(await controller.setFamiliarityEnabled(payload.botId, payload.enabled), cachedEncode);
+      } else if (endpoint === QQ_ENDPOINTS.listFamiliarity) {
+        value = sanitizePublic(await controller.listFamiliarity(payload.botId, { offset: payload.offset }));
+      } else if (endpoint === QQ_ENDPOINTS.clearFamiliarity) {
+        value = await controller.clearFamiliarity(payload.botId, payload.id);
       } else if (endpoint === QQ_ENDPOINTS.setStickers) {
         value = await publicStatus(await controller.setStickersEnabled(payload.botId, payload.enabled), cachedEncode);
       } else if (endpoint === QQ_ENDPOINTS.setGroupContext) {

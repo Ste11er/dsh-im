@@ -24,6 +24,19 @@ class FakeBot extends EventEmitter {
   async sendText(target, text) { this.sent.push({ target, text }); }
 }
 
+test('gateway disconnect immediately clears runtime readiness and only READY/RESUMED restores it', async t => {
+  const bot = new FakeBot(); let options;
+  const runtime = new QqRuntime({ config: { botId: 'qq_test', appId: 'app', ownerUserOpenid: '*' }, appSecret: 'secret',
+    harness: { ensureRunning: async () => true }, state: {}, createBot: value => { options = value; return bot; },
+    typingMiddleware: () => async (_ctx, next) => next() });
+  t.after(() => runtime.stop()); await runtime.start();
+  options.onConnectionState({ state: 'reconnecting', recovering: true, disconnectReason: 'gateway-heartbeat-timeout', lastFrameAt: 100 });
+  assert.equal(runtime.status.ready, false); assert.equal(runtime.status.qqConnectionState, 'connecting');
+  assert.equal(runtime.status.gatewayTransport.disconnectReason, 'gateway-heartbeat-timeout');
+  bot.emit('resumed');
+  assert.equal(runtime.status.ready, true); assert.equal(runtime.status.lastError, null);
+});
+
 test('QQ runtime preserves mention decisions through sanitization, typing and commands', async (t) => {
   const bot = new FakeBot();
   bot.appId = '123';
