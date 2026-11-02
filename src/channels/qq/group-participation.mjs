@@ -76,18 +76,18 @@ export class QqGroupParticipation {
       task.finally(queued.resolve);
     }, Math.min(remaining, 2_147_483_647));
   }
-  consider(key, run, { coalesce = false } = {}) {
+  consider(key, run, { coalesce = false, onDecision = () => {} } = {}) {
     this.#prune();
-    if (!this.#settings.enabled || this.#signal?.aborted) return Promise.resolve();
+    if (!this.#settings.enabled || this.#signal?.aborted) { onDecision('disabled'); return Promise.resolve(); }
     const pending = this.#pending.get(key);
     if (pending || this.#last.has(key) || this.#queued.has(key)) {
       if (coalesce && !pending?.replying) {
         this.#queue(key, run);
         pending?.controller.abort();
       }
-      return Promise.resolve();
+      onDecision('coalesced'); return Promise.resolve();
     }
-    if (this.#last.size >= QQ_GROUP_CONTEXT_LIMITS.groups) return Promise.resolve();
+    if (this.#last.size >= QQ_GROUP_CONTEXT_LIMITS.groups) { onDecision('ineligible'); return Promise.resolve(); }
     const controller = new AbortController();
     const signal = this.#signal ? AbortSignal.any([this.#signal, controller.signal]) : controller.signal;
     const entry = { controller, task: null, replying: false };

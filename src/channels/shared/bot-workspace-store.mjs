@@ -1519,8 +1519,10 @@ function assertCurrentBotScope(isCurrentScope) {
 function decorateResult(workspaces, result, agentPresetCatalogSource, modelCatalogSource) {
   const decorate = (value) => {
     const decorated = workspaces.decorateStatus(value);
+    // Catalogs belong to account snapshots, not detail rows, diagnostics or
+    // operation receipts (which may be downloaded verbatim).
     if ((!agentPresetCatalogSource && !modelCatalogSource)
-      || !decorated || typeof decorated !== 'object') return decorated;
+      || !decorated || typeof decorated !== 'object' || !Array.isArray(decorated.bots)) return decorated;
     const attachCatalogs = ([agentPresetCatalog, modelCatalog]) => ({
       ...decorated,
       ...(agentPresetCatalog ? { agentPresetCatalog } : {}),
@@ -2208,6 +2210,8 @@ export function createWorkspaceAwareController(controller, {
   agentPresetCatalog,
   modelCatalog,
   validateAccessPolicyForBot,
+  onAccessPolicyChanged,
+  onWorkspaceChanged,
 } = {}) {
   if (!controller || !workspaces || typeof stateFor !== 'function') {
     throw new TypeError('controller, workspaces, and stateFor are required');
@@ -2244,6 +2248,7 @@ export function createWorkspaceAwareController(controller, {
         clearSessions: () => state.clearSessions(),
         incarnation,
       });
+      onWorkspaceChanged?.(botId);
       return decorate(await controller.status());
     });
   };
@@ -2397,6 +2402,7 @@ export function createWorkspaceAwareController(controller, {
       // projections and disk writes must leave the live policy unchanged.
       const result = projectStatus ? await projectStatus(updated) : updated;
       await workspaces.setAccessPolicy(botId, policy, { incarnation });
+      onAccessPolicyChanged?.(botId);
       return result;
     });
   };

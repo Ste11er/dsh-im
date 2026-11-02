@@ -847,3 +847,11 @@ test('workspace session and listModels re-check their scope after an in-flight R
   listGate.resolve(CATALOG);
   await assert.rejects(globalListing, (error) => error?.code === 'workspace-bot-not-found');
 });
+
+test('optional turn observer reports only the turn correlated to this prompt', async () => {
+  const turn = controlledTurn(); const observations = [];
+  const asking = turn.client.ask(turn.id, 'work', { timeoutMs: 2000, onTurn: metadata => observations.push(metadata) });
+  await turn.admitted; turn.finish({ text: 'done', reason: 'completed' });
+  assert.equal(await asking, 'done');
+  assert.deepEqual(observations, [{ sessionId: turn.id, turn: 7 }]);
+});

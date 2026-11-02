@@ -42,3 +42,10 @@ export function normalizeQqMentions(message, botIds = new Set()) {
     (match, id) => botIds.has(id) ? '' : match).trim();
   return message;
 }
+
+/** Only the bridge's admitted empty-mention continuation may use this marker.
+ * Keep rawEventType unchanged: this is a local wake-up, not a platform @ event.
+ */
+export function addressQqContinuation(message) {
+  return { ...message, [addressedToBot]: true };
+}

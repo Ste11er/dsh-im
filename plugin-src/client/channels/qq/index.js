@@ -1,3 +1,4 @@
+import { TracePanel } from './trace-panel.js';
 import { ParticipationEditor } from './participation-editor.js';
 import { FamiliarityEditor } from './familiarity-editor.js';
 import { GroupReceptionStatus } from './reception-status.js';
@@ -352,6 +353,8 @@ export function AccountCard({
   onFamiliarityChange,
   onFamiliarityList,
   onFamiliarityClear,
+  onTraceChange, onTraceList, onTraceDetail, onTraceExport,
+  onEmptyMentionChange,
   onStickersChange,
   onGroupContextChange,
   onGroupMemoryChange,
@@ -428,6 +431,8 @@ export function AccountCard({
       }),
       h(ParticipationEditor, { settings: account.groupParticipation, contextEnabled: account.groupContextEnabled, stats: account.participationStats, disabled: Boolean(busy), onSave: onParticipationSave }),
       h(GroupReceptionStatus, { groups: account.groupReception }),
+      h(EmptyMentionSetting, { seconds: account.emptyMentionWaitSeconds, status: account.emptyMention, disabled: Boolean(busy), onChange: onEmptyMentionChange }),
+      h(TracePanel, { status: account.trace, disabled: Boolean(busy), onChange: onTraceChange, onList: onTraceList, onDetail: onTraceDetail, onExport: onTraceExport }),
       h(PersonaEditor, { persona: account.persona, disabled: Boolean(busy), onSave: onPersonaSave }),
       h(FamiliarityEditor, { enabled: account.familiarityEnabled, status: account.familiarity, disabled: Boolean(busy), onChange: onFamiliarityChange, onList: onFamiliarityList, onClear: onFamiliarityClear }),
       h(StickersToggle, { enabled: account.stickersEnabled, disabled: Boolean(busy), onChange: onStickersChange }),
@@ -762,6 +767,11 @@ export function QqSettingsTab({ rpcCall }) {
             ),
             onParticipationSave: settings => botAction(account, 'group-participation', QQ_ENDPOINTS.setGroupParticipation, { botId: account.botId, settings }),
             onPersonaSave: persona => botAction(account, 'persona', QQ_ENDPOINTS.setPersona, { botId: account.botId, persona }),
+            onEmptyMentionChange: seconds => botAction(account, 'empty-mention', QQ_ENDPOINTS.setEmptyMention, { botId: account.botId, seconds }),
+            onTraceChange: enabled => botAction(account, 'trace', QQ_ENDPOINTS.setTrace, { botId: account.botId, enabled }),
+            onTraceList: options => invoke(QQ_ENDPOINTS.listTraces, { botId: account.botId, ...options }),
+            onTraceDetail: id => invoke(QQ_ENDPOINTS.traceDetail, { botId: account.botId, id }),
+            onTraceExport: () => invoke(QQ_ENDPOINTS.exportTraces, { botId: account.botId }),
             onFamiliarityChange: enabled => botAction(account, 'familiarity', QQ_ENDPOINTS.setFamiliarity, { botId: account.botId, enabled }),
             onFamiliarityList: offset => invoke(QQ_ENDPOINTS.listFamiliarity, { botId: account.botId, offset }),
             onFamiliarityClear: async id => { const result = await invoke(QQ_ENDPOINTS.clearFamiliarity, { botId: account.botId, id }); await loadStatus(); return result; },
@@ -828,4 +838,15 @@ export function QqSettingsTab({ rpcCall }) {
             model.bots.length === 0 && !provision && !credentialOpen
               ? h(EmptyView, { busy, onStart: () => void startProvisioning() }) : null,
             botList))));
+}
+
+export function EmptyMentionSetting({ seconds = 30, status, disabled, onChange }) {
+  return h('fieldset', { className: 'dqq-sendControl', disabled: Boolean(disabled) },
+    h('legend', null, '空 @ 等待补充'),
+    h('label', null, '静默等待时间', h('select', { value: seconds, onChange: event => onChange(Number(event.target.value)) },
+      h('option', { value: 0 }, '关闭'), h('option', { value: 30 }, '30 秒'), h('option', { value: 60 }, '60 秒'))),
+    h('p', null, '仅群聊空 @：同一人补发的下一条普通内容合并为一次输入；不调用模型追问，超时静默结束。'),
+    h('p', null, '新 @、命令、审批或提问、暂停、断连会结束等待。普通带内容的 @ 和未 @ 自主接话沿用原有规则。'),
+    h('p', null, '只在本群允许接收全部消息时，才能收到未 @ 的补充；否则请补发时再次 @。'),
+    status ? h('p', null, '当前等待：', status.pending, '；已合并：', status.merged, '；已超时：', status.expired) : null);
 }

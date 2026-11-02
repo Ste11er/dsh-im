@@ -324,3 +324,19 @@ test('QQ runtime enables result-file delivery without per-bot configuration', as
   assert.equal(typeof onArtifact, 'function');
   await runtime.stop();
 });
+
+test('gateway disconnect clears an empty-mention wait without accepting an unmentioned follow-up', async t => {
+  const bot = new FakeBot(); let options; const seen = new Set();
+  const runtime = new QqRuntime({ config: { botId: 'qq_empty', appId: 'app', ownerUserOpenid: '*' }, appSecret: 'secret',
+    harness: { ensureRunning: async () => true, currentWorkspace: () => '/tmp/empty-test' },
+    state: { hasSeen: id => seen.has(id), markSeen: async id => seen.add(id), sessionFor: () => null },
+    createBot: value => { options = value; return bot; }, typingMiddleware: () => async (_ctx,next) => next() });
+  t.after(() => runtime.stop()); await runtime.start();
+  const message = { messageId: 'empty', kind: 'group', groupOpenid: 'g', senderId: 'member', content: '', rawEventType: 'GROUP_AT_MESSAGE_CREATE', timestamp: new Date().toISOString(), replyTarget: { scope: 'group', targetId: 'g', msgId: 'empty' } };
+  bot.emit('message', {}, message); await new Promise(setImmediate);
+  assert.equal(runtime.status.emptyMention.pending, 1);
+  options.onConnectionState({ state: 'reconnecting', recovering: true });
+  assert.equal(runtime.status.emptyMention.pending, 0); assert.equal(runtime.status.emptyMention.cancelled, 1);
+  bot.emit('resumed'); bot.emit('message', {}, { ...JSON.parse(JSON.stringify(message)), messageId: 'follow', content: '补充', rawEventType: 'GROUP_MESSAGE_CREATE' });
+  await new Promise(setImmediate); assert.equal(bot.sent.length,0);
+});

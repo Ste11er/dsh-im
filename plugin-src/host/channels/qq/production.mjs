@@ -138,7 +138,7 @@ export async function createProductionController(ctx, config = {}, internals = {
       }
     },
     logger,
-    createRuntime: async ({ botId, config: botConfig, appSecret }) => {
+    createRuntime: async ({ botId, config: botConfig, appSecret, traces }) => {
       const state = await stateFor(botId);
       await workspaces.ensure(botId, {
         defaultAgentPreset: config.agentPreset,
@@ -152,6 +152,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         () => configStore.get(botId).groupMemoryModels?.image ?? workspaces.modelFor(botId), getImageSettings);
       return new Runtime({
         config: botConfig,
+        traces,
         appSecret,
         harness: workspaceScope.harness,
         state: workspaceScope.state,
@@ -203,6 +204,8 @@ export async function createProductionController(ctx, config = {}, internals = {
     },
   });
   const controller = createWorkspaceAwareController(coreController, {
+    onAccessPolicyChanged: botId => coreController.clearEmptyMentions(botId),
+    onWorkspaceChanged: botId => coreController.clearEmptyMentions(botId),
     workspaces,
     stateFor,
     agentPresetCatalog,

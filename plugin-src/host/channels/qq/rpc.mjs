@@ -1,3 +1,5 @@
+import { qqEmptyMentionWaitSeconds } from '../../../../src/channels/qq/empty-mention-config.mjs';
+import { QQ_TRACE_RESULTS } from '../../../../src/channels/qq/message-trace.mjs';
 import { qqGroupParticipation } from '../../../../src/channels/qq/group-participation.mjs';
 import { qqPersona } from '../../../../src/channels/qq/persona.mjs';
 import { SET_MESSAGE_MODE_ENDPOINT, validMessageModePayload } from '../../../../src/channels/shared/message-mode.mjs';
@@ -29,6 +31,11 @@ export const SET_GROUP_CONTEXT_ENDPOINT = 'bot.group-context.set';
 
 export const QQ_ENDPOINTS = Object.freeze({
   status: 'connection.status',
+  setTrace: 'bot.trace.set',
+  setEmptyMention: 'bot.empty-mention.set',
+  listTraces: 'bot.trace.list',
+  traceDetail: 'bot.trace.detail',
+  exportTraces: 'bot.trace.export',
   beginProvisioning: 'provision.begin',
   pollProvisioning: 'provision.poll',
   cancelProvisioning: 'provision.cancel',
@@ -152,6 +159,24 @@ function payloadFailure(endpoint, payload) {
       && typeof payload.enabled === 'boolean'
       ? null : 'bot.group-context.set requires a botId and a boolean enabled.';
   }
+  if (endpoint === QQ_ENDPOINTS.setEmptyMention) {
+    if (!exactKeys(payload, ['botId', 'seconds']) || !validId(payload.botId) || typeof payload.seconds !== 'number') return 'Invalid empty mention setting.';
+    try { qqEmptyMentionWaitSeconds(payload.seconds); return null; } catch { return 'Invalid empty mention setting.'; }
+  }
+  if (endpoint === QQ_ENDPOINTS.setTrace) {
+    return exactKeys(payload, ['botId', 'enabled']) && validId(payload.botId) && typeof payload.enabled === 'boolean' ? null : 'Invalid trace setting.';
+  }
+  if (endpoint === QQ_ENDPOINTS.listTraces) {
+    return exactKeys(payload, ['botId', 'offset', 'result']) && validId(payload.botId)
+      && (payload.offset === undefined || Number.isSafeInteger(payload.offset) && payload.offset >= 0)
+      && (payload.result === undefined || QQ_TRACE_RESULTS.includes(payload.result)) ? null : 'Invalid trace query.';
+  }
+  if (endpoint === QQ_ENDPOINTS.traceDetail) {
+    return exactKeys(payload, ['botId', 'id']) && validId(payload.botId) && typeof payload.id === 'string' && /^[a-f0-9]{24}$/.test(payload.id) ? null : 'Invalid trace identifier.';
+  }
+  if (endpoint === QQ_ENDPOINTS.exportTraces) {
+    return exactKeys(payload, ['botId']) && validId(payload.botId) ? null : 'Invalid trace export.';
+  }
   if (endpoint === QQ_ENDPOINTS.listFamiliarity) {
     return exactKeys(payload, ['botId', 'offset']) && validId(payload.botId)
       && (payload.offset === undefined || (Number.isSafeInteger(payload.offset) && payload.offset >= 0))
@@ -237,6 +262,11 @@ export function createQqRpcHandler(controller, { encodeQr = qrDataUrl } = {}) {
     try {
       let value;
       if (endpoint === QQ_ENDPOINTS.status) value = await publicStatus(await controller.status(), cachedEncode);
+      else if (endpoint === QQ_ENDPOINTS.setEmptyMention) value = await publicStatus(await controller.setEmptyMentionWaitSeconds(payload.botId, payload.seconds), cachedEncode);
+      else if (endpoint === QQ_ENDPOINTS.setTrace) value = await publicStatus(await controller.setTraceEnabled(payload.botId, payload.enabled), cachedEncode);
+      else if (endpoint === QQ_ENDPOINTS.listTraces) value = await controller.listTraces(payload.botId, { offset: payload.offset, result: payload.result });
+      else if (endpoint === QQ_ENDPOINTS.traceDetail) value = await controller.traceDetail(payload.botId, payload.id);
+      else if (endpoint === QQ_ENDPOINTS.exportTraces) value = await controller.exportTraces(payload.botId);
       else if (endpoint === QQ_ENDPOINTS.beginProvisioning) value = await withEncodedQr(await controller.startProvisioning(), cachedEncode);
       else if (endpoint === QQ_ENDPOINTS.pollProvisioning) {
         const current = await controller.registrationStatus(payload.attemptId);

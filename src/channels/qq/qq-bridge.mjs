@@ -1,3 +1,5 @@
+import { QqEmptyMentionWaits } from './empty-mention.mjs';
+import { qqTraceEvent, qqTraceError, bindQqTrace } from './message-trace.mjs';
 import { qqFamiliarityText } from './familiarity-context.mjs';
 import { qqReplyActivity } from './reply-activity.mjs';
 import { isQqComputerCommandOwner, qqComputerCommandOwners } from './computer-command-owner.mjs';
@@ -89,11 +91,13 @@ import {
 } from './qq-menu.mjs';
 import { withSessionBindingLock } from '../shared/session-binding-lock.mjs';
 import { t } from '../shared/i18n.mjs';
-import { isQqGroupContextMessage, isQqMessageAddressed, normalizeQqMentions } from './qq-mention.mjs';
+import { isQqGroupContextMessage, isQqMessageAddressed, normalizeQqMentions, addressQqContinuation } from './qq-mention.mjs';
 import { QqGroupContext, qqGroupContextEnabled } from './group-context.mjs';
 
 const groupContextSnapshot = Symbol('qq.groupContextSnapshot');
 const groupMemorySnapshot = Symbol('qq.groupMemorySnapshot');
+const emptyMentionContinuation = Symbol('qq.emptyMentionContinuation');
+const emptyMentionChecked = Symbol('qq.emptyMentionChecked');
 
 function interactionResolvedText() {
   return t('这个问题已在其他客户端处理，无需再次回答。');
@@ -482,6 +486,8 @@ export class QqHarnessBridge {
   #persona;
   #familiarity;
   #onGroupDecision;
+  #traces;
+  #emptyMentions;
   #stickersEnabled;
   #groupContextEnabled;
   #groupContext = new QqGroupContext();
@@ -523,6 +529,8 @@ export class QqHarnessBridge {
     persona,
     familiarity = null,
     onGroupDecision = () => {},
+    traces = null,
+    emptyMentionWaitMs = 30_000,
     stickersEnabled = false,
     groupContextEnabled = false,
     groupMemory = null,
@@ -561,7 +569,14 @@ export class QqHarnessBridge {
     this.#participation.set(this.#participationSettings);
     this.#persona = qqPersona(persona);
     this.#familiarity = familiarity;
-    this.#onGroupDecision = onGroupDecision;
+    this.#traces = traces;
+    this.#emptyMentions = new QqEmptyMentionWaits({ waitMs: emptyMentionWaitMs, signal });
+    this.#onGroupDecision = (groupId, stage) => {
+      const phase = ['assessing', 'waiting', 'declined'].includes(stage) ? 'judgment'
+        : ['replied', 'reply-started'].includes(stage) ? 'delivery' : 'context';
+      if (stage !== 'replied') qqTraceEvent(phase, stage);
+      onGroupDecision(groupId, stage);
+    };
     this.#stickersEnabled = qqStickersEnabled(stickersEnabled);
     this.#groupContextEnabled = qqGroupContextEnabled(groupContextEnabled);
     this.#groupMemory = groupMemory;
@@ -591,7 +606,7 @@ export class QqHarnessBridge {
     const paused = value === true;
     if (this.#paused === paused) return paused;
     this.#paused = paused;
-    if (paused) this.#participation.cancelAll();
+    if (paused) { this.#participation.cancelAll(); this.clearEmptyMentions(); }
     if (!paused) {
       void this.#deferred.resume().catch((error) => {
         this.#logger?.warn?.('[dsh-im:qq] deferred delivery resume failed:', error?.message ?? String(error));
@@ -626,6 +641,48 @@ export class QqHarnessBridge {
     return this.#dryRun.list();
   }
 
+  get emptyMentionStatus() { return this.#emptyMentions.status; }
+  setEmptyMentionWaitMs(value) { this.#emptyMentions.setDuration(value); }
+  clearEmptyMentions() { this.#emptyMentions.clear(); }
+  #emptyMentionContext(key) {
+    return JSON.stringify({
+      ...this.#menuContext(key),
+      generation: this.#harness.conversationWorkspaceGeneration?.(key),
+      policy: this.#accessPolicy?.getSettings(),
+    });
+  }
+  #hasPendingInput(key) {
+    return this.#pendingInteractions.has(key) || this.#approvals.hasPending(key)
+      || this.#batchInputs.status(key).phase !== 'idle';
+  }
+  #waitForEmptyMention(message, key) {
+    const messageId = message.messageId;
+    const context = this.#emptyMentionContext(key);
+    this.#acceptedMessageIds.set(messageId, null);
+    // Publish the wait before the asynchronous disk commit, but a follow-up
+    // must await that commit before it can create a Harness turn.
+    let entry;
+    const ready = Promise.resolve().then(() => entry ? this.#state.markSeen(messageId) : undefined);
+    entry = this.#emptyMentions.start(key, { senderId: message.senderId, messageId,
+      context, ready,
+      onFinish: bindQqTrace(result => qqTraceEvent('terminal', result === 'expired' ? 'empty-expired' : result === 'merged' ? 'empty-merged' : 'empty-cancelled')),
+    });
+    if (!entry) {
+      this.#acceptedMessageIds.delete(messageId);
+      // The normal empty-input notice remains the fallback when the bounded
+      // wake-up registry is full or the setting is disabled.
+      return null;
+    }
+    qqTraceEvent('context', 'empty-waiting');
+    return ready.then(() => {
+      this.#status.messagesReceived++;
+      this.#status.lastMessageAt = new Date().toISOString();
+      return { outcome: 'waiting', reason: 'empty-mention' };
+    }).catch(error => {
+      this.#emptyMentions.finish(entry, 'cancelled'); throw error;
+    }).finally(() => this.#acceptedMessageIds.delete(messageId));
+  }
+
   get participationStats() { return this.#participation.status; }
   setGroupParticipation(value) {
     const settings = qqGroupParticipation(value);
@@ -642,20 +699,22 @@ export class QqHarnessBridge {
   #considerParticipation(key, message) {
     const text = safeText(message);
     if (!this.#canParticipate(key, message) || (!text && !hasQqImageAttachments(message)) || text.startsWith('/') || hasQqFileAttachments(message)
-      || message.replyTarget?.scope !== 'group' || message.replyTarget.targetId !== message.groupOpenid || !message.replyTarget.msgId) return Promise.resolve();
+      || message.replyTarget?.scope !== 'group' || message.replyTarget.targetId !== message.groupOpenid || !message.replyTarget.msgId) { qqTraceEvent('judgment', this.#participationSettings.enabled ? 'ineligible' : 'disabled'); return Promise.resolve(); }
     if (this.#participation.isReplying(key)) {
       this.#groupContext.consumeSpeaker(key, message.senderId);
       return Promise.resolve();
     }
-    return this.#participation.consider(key, (signal, control) => qqReplyActivity.run(async () => {
-      if (!this.#canParticipate(key, message) || qqGroupReplyExpired(message)) return;
+    return this.#participation.consider(key, bindQqTrace((signal, control) => qqReplyActivity.run(async () => {
+      if (!this.#canParticipate(key, message)) { qqTraceEvent('judgment', 'ineligible'); return; }
+      if (qqGroupReplyExpired(message)) { qqTraceEvent('judgment', 'window-expired'); return; }
       this.#onGroupDecision(message.groupOpenid, 'assessing');
       const snapshot = this.#groupContext.snapshot(key);
       const maxImages = snapshot?.hasImages ? (await this.#harness.getImageInputLimits()).maxImages : 0;
       signal.throwIfAborted();
       const utterance = this.#groupContext.utterance(key, message.senderId, { maxImages });
-      if (!utterance) return;
+      if (!utterance) { qqTraceEvent('judgment', 'ineligible'); return; }
       const { content } = utterance;
+      qqTraceEvent('context', 'prepared', { images: utterance.images.length });
       // Share original bytes only for this assessment/reply. The group cache
       // keeps lazy references, so a later turn does not retain downloaded bytes.
       const images = withQqImageDownloadBudget(utterance.images.map(source => {
@@ -686,16 +745,18 @@ export class QqHarnessBridge {
           if (!await beginReply()) return;
           this.#groupContext.consumeUtterance(utterance);
           if (qqGroupReplyExpired(message)) {
+            qqTraceEvent('terminal', 'window-expired');
             this.#logger.info?.('[dsh-im:qq] autonomous reply skipped: source message reply window expired during generation');
             return;
           }
           this.#harness.assertWorkspaceScope?.();
           const decision = evaluateSendGate({ config: this.#sendControl, usage: this.#state.sendControlUsage?.(), segments: chunkMarkdownParts(answer).length + artifacts.length });
-          if (decision.action !== 'allow') return;
+          if (decision.action !== 'allow') { qqTraceEvent('delivery', 'not-attempted'); return; }
           await this.#recordSendControlUsage(decision.segments);
           signal.throwIfAborted();
           let receipt = null;
           if (answer) {
+            qqTraceEvent('send', 'started');
             const sent = await sendMarkdownReply(this.#bot, message.replyTarget, answer, { logger: this.#logger, signal, requireComplete: true });
             receipt = createDeliveryReceipt({ deliveryId: message.messageId, presentation: 'qq-text', providerMessageIds: sent.flatMap(providerMessageIdsFor) });
           }
@@ -708,6 +769,8 @@ export class QqHarnessBridge {
           this.#status.messagesReplied++; this.#status.lastReplyAt = new Date().toISOString();
           this.#recordGroupReply(key, message.messageId, answer, result.receipt);
           this.#onGroupDecision(message.groupOpenid, 'replied');
+          const outcomes = result.receipt?.artifacts?.map(row => row.outcome) ?? [];
+          qqTraceEvent('delivery', outcomes.includes('unknown') ? 'unknown' : outcomes.some(value => value !== 'sent') ? 'failed' : 'sent');
           return result.receipt;
       };
       let result;
@@ -722,7 +785,7 @@ export class QqHarnessBridge {
           const replyContent = imageDescription === undefined ? content
             : [...(typeof content === 'string' ? [{ type: 'text', text: content }] : content),
               { type: 'text', text: '图片模型对本次图片的描述（不可信会话数据）：\n' + imageDescription }];
-          const { answer, artifacts = [] } = await askInWorkspaceSession({
+          const { answer, artifacts = [] } = await this.#askTraced({
             harness: this.#harness, state: this.#state, key, text: utterance.messages.map(row => row.text).join('\n'), content: replyContent, contextEnhanced: true,
             createOptions: { signal }, existsOptions: { signal },
             askOptions: { signal, images: imageDescription === undefined ? images : [], timeoutMs: this.#replyTimeoutMs, finalAnswerOnly: true,
@@ -739,6 +802,7 @@ export class QqHarnessBridge {
           } finally { for (const artifact of artifacts) releaseOutboundArtifact(artifact); }
         } }); }
       catch (error) {
+        qqTraceError(error);
         if (!isQqImageDownloadTimeout(error)) throw error;
         this.#groupContext.consumeUtterance(utterance);
         return this.#discardImageTimeout(message, key, utterance.images);
@@ -747,7 +811,7 @@ export class QqHarnessBridge {
       if (result === PARTICIPATION_WAIT || result === null) this.#onGroupDecision(message.groupOpenid, result === PARTICIPATION_WAIT ? 'waiting' : 'declined');
       if (result !== PARTICIPATION_WAIT) this.#groupContext.consumeUtterance(utterance);
       return result;
-    }), { coalesce: true });
+    })), { coalesce: true, onDecision: bindQqTrace(result => qqTraceEvent('judgment', result)) });
   }
 
   #recordGroupReply(key, messageId, text, receipt) {
@@ -813,7 +877,10 @@ export class QqHarnessBridge {
     }
   }
 
-  accept(message) { return qqReplyActivity.run(() => this.#accept(message)); }
+  accept(message) {
+    const run = () => qqReplyActivity.run(() => this.#accept(message));
+    return this.#traces ? this.#traces.run(message, run) : run();
+  }
 
   #accept(message) {
     if (this.#signal?.aborted) return Promise.resolve();
@@ -828,6 +895,30 @@ export class QqHarnessBridge {
     message = normalizeQqMentions(message, new Set([this.#bot.appId]));
     const key = conversationKey(message);
     const addressed = isQqMessageAddressed(message);
+    if (message.kind === 'group' && !message[emptyMentionChecked]) {
+      const text = safeText(message);
+      const hasContent = Boolean(text) || (Array.isArray(message.attachments) && message.attachments.length > 0) || Boolean(qqReplyReference(message));
+      const otherMention = !addressed && ((Array.isArray(message.mentions) && message.mentions.length > 0) || /<@!?[^>]+>/u.test(text));
+      if (addressed || text.startsWith('/') || otherMention || this.#hasPendingInput(key)) this.#emptyMentions.cancel(key);
+      else if (hasContent && !this.#paused) {
+        const entry = this.#emptyMentions.take(key, sender);
+        if (entry) {
+          this.#acceptedMessageIds.set(messageId, null);
+          return entry.ready.then(() => {
+            this.#acceptedMessageIds.delete(messageId);
+            if (this.#signal?.aborted) return;
+            if (!this.#emptyMentions.current(entry) || this.#paused || this.#hasPendingInput(key)
+              || this.#emptyMentionContext(key) !== entry.context) {
+              this.#emptyMentions.finish(entry, 'cancelled');
+              return this.#accept({ ...message, [emptyMentionChecked]: true });
+            }
+            this.#emptyMentions.finish(entry, 'merged');
+            qqTraceEvent('context', 'empty-followup', { sourceId: entry.messageId });
+            return this.#accept({ ...addressQqContinuation(message), [emptyMentionContinuation]: true, [emptyMentionChecked]: true });
+          }).finally(() => this.#acceptedMessageIds.delete(messageId));
+        }
+      }
+    }
     // Ambient data must never enter commands, approvals, questions, busy-turn
     // steering or attachment prefetch. Keep it available even during a long turn.
     if (!addressed) {
@@ -840,6 +931,7 @@ export class QqHarnessBridge {
       const access = evaluateInboundAccess(this.#accessPolicy, {
         conversationType: 'group', senderIds: sender, isCommand: false,
       });
+      qqTraceEvent('access', access.allowed ? 'allowed' : 'access-denied');
       if (!access.allowed) {
         this.#onGroupDecision(message.groupOpenid, 'access-denied');
         this.#status.groupContextRejected += 1;
@@ -850,6 +942,7 @@ export class QqHarnessBridge {
         const error = this.#archiveGroupMessage(key, message);
         if (error) return Promise.reject(error);
         if (qqGroupReplyExpired(message)) {
+          qqTraceEvent('terminal', 'window-expired');
           this.#status.messagesReceived += 1;
           this.#status.lastMessageAt = new Date().toISOString();
           this.#logger.info?.('[dsh-im:qq] delayed group event archived but excluded from fresh context and participation: reply window expired');
@@ -895,6 +988,7 @@ export class QqHarnessBridge {
         : senderAllowed(message, this.#ownerUserOpenid)
           ? { allowed: true, reason: 'legacy-owner' }
           : { allowed: false, reason: 'sender-not-allowed' };
+      qqTraceEvent('access', access.allowed ? 'allowed' : 'access-denied');
       if (!access.allowed) {
         if (message.kind === 'group') this.#onGroupDecision(message.groupOpenid, 'access-denied');
         this.#acceptedMessageIds.set(messageId, null);
@@ -907,6 +1001,16 @@ export class QqHarnessBridge {
       && !this.#approvals.hasPending(key) && !(awaiting && awaiting.actor === sender && !awaiting.submitting && !awaiting.claimedReplyMessageId)) {
       this.#onGroupDecision(message.groupOpenid, 'busy-dropped');
       return this.#dropBusy(messageId);
+    }
+    if (message.kind === 'group' && nonEmptyString(message.groupOpenid) && !commandText && (!message.attachments || message.attachments.length === 0)
+      && !qqReplyReference(message) && !this.#paused && !this.#hasPendingInput(key) && this.#emptyMentions.status.waitMs > 0) {
+      if (qqGroupReplyExpired(message)) {
+        qqTraceEvent('terminal', 'window-expired');
+        return Promise.resolve(this.#state.markSeen(messageId));
+      }
+      this.#participation.cancel(key);
+      const waiting = this.#waitForEmptyMention(message, key);
+      if (waiting) return waiting;
     }
     if (message.kind === 'group') {
       this.#onGroupDecision(message.groupOpenid, 'mention-accepted');
@@ -1113,6 +1217,7 @@ export class QqHarnessBridge {
     await this.#state.markSeen(message.messageId);
     this.#status.messagesDroppedImageTimeout = (this.#status.messagesDroppedImageTimeout ?? 0) + 1;
     this.#status.lastImageTimeoutAt = new Date().toISOString();
+    qqTraceEvent('terminal', 'image-timeout-dropped');
     if (message.kind === 'group') this.#onGroupDecision(message.groupOpenid, 'image-timeout-dropped');
     this.#logger.info?.('[dsh-im:qq] inbound image download timed out; message discarded');
   }
@@ -1431,6 +1536,31 @@ export class QqHarnessBridge {
     };
   }
 
+  async #askTraced(options) {
+    if (!this.#traces?.status.enabled) return askInWorkspaceSession(options);
+    const originalPrepare = options.prepareContent;
+    const originalUpdate = options.askOptions?.onUpdate;
+    qqTraceEvent('turn', 'started');
+    try {
+      const result = await askInWorkspaceSession({ ...options,
+        prepareContent: async args => {
+          qqTraceEvent('turn', 'started', { sessionId: args.sessionId });
+          return originalPrepare ? originalPrepare(args) : args.content ?? args.text;
+        },
+        askOptions: { ...options.askOptions, progressMode: 'all', onTurn: metadata => {
+          qqTraceEvent('turn', 'started', { sessionId: metadata.sessionId, turnId: metadata.turn });
+          options.askOptions?.onTurn?.(metadata);
+        }, onUpdate: update => {
+          if (update.type === 'tool') qqTraceEvent('tool', 'started', { toolName: update.name, turnId: update.turn });
+          else if (update.toolName) qqTraceEvent('tool', update.error || update.errorCode ? 'failed' : 'completed', { toolName: update.toolName, turnId: update.turn });
+          return originalUpdate?.(update);
+        } },
+      });
+      qqTraceEvent('turn', 'completed', { sessionId: result.sessionId });
+      return result;
+    } catch (error) { qqTraceError(error); throw error; }
+  }
+
   async #process(message, key, {
     alreadyRecorded = false,
     preparedMessage,
@@ -1529,7 +1659,9 @@ export class QqHarnessBridge {
         ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal, deferImages: true })
         : undefined;
       const originalContent = content ?? text;
-      content = originalContent;
+      content = message[emptyMentionContinuation]
+        ? [{ type: 'text', text: '当前群友先单独 @ 了机器人，随后补充了以下当前消息；请作为一次输入回应。' }, ...(typeof originalContent === 'string' ? [{ type: 'text', text: originalContent }] : originalContent)]
+        : originalContent;
       const familiarityContext = this.#familiarityFor(message, true);
       let contextImages = [];
       if (this.#groupContextEnabled) {
@@ -1538,7 +1670,7 @@ export class QqHarnessBridge {
         // sources within the same configured limit that Harness enforces.
         const maxImages = contextSnapshot?.hasImages
           ? Math.max(0, (await this.#harness.getImageInputLimits()).maxImages - promptMessage.images.length) : 0;
-        const prepared = this.#groupContext.prepare(contextSnapshot, originalContent, {
+        const prepared = this.#groupContext.prepare(contextSnapshot, content, {
           maxImages, imageOffset: promptMessage.images.length,
         });
         content = prepared.content;
@@ -1569,6 +1701,7 @@ export class QqHarnessBridge {
       let answer;
       let artifacts = [];
       attemptedImages = [...promptMessage.images, ...contextImages];
+      qqTraceEvent('context', 'prepared', { images: attemptedImages.length, files: promptMessage.files.length });
       const boundedImages = withQqImageDownloadBudget(attemptedImages, { timeoutMs: this.#imageDownloadTimeoutMs });
       try {
         // Persist consumption before handing the prompt to Harness. Provider
@@ -1578,7 +1711,7 @@ export class QqHarnessBridge {
           this.#groupContext.record(key, { messageId, senderId: sender, content: text, images: promptMessage.images });
           this.#groupContext.consumeSpeaker(key, sender);
         }
-        ({ answer, artifacts = [] } = await askInWorkspaceSession({
+        ({ answer, artifacts = [] } = await this.#askTraced({
           deferredDelivery: () => ({ coordinator: this.#deferred, target: { scope: target.scope, targetId: target.targetId } }),
           harness: this.#harness,
           state: this.#state,
@@ -1659,6 +1792,7 @@ export class QqHarnessBridge {
           }
         }
         if (!streamFinished) {
+          qqTraceEvent('send', 'started');
           const deliveries = await sendMarkdownReply(this.#bot, target, displayAnswer, {
             logger: this.#logger,
           });
@@ -1670,9 +1804,13 @@ export class QqHarnessBridge {
         }
       } catch (error) {
         textSendError = channelDeliveryFailure(error);
+        qqTraceError(textSendError);
         this.#logger.warn?.('[dsh-im:qq] final text delivery failed; continuing with result files:', error);
       }
       const delivery = await this.#deliverArtifacts(target, messageId, artifacts, textReceipt);
+      const outcomes = delivery.receipt?.artifacts?.map(row => row.outcome) ?? [];
+      qqTraceEvent('delivery', outcomes.includes('unknown') || textSendError?.code === 'channel-delivery-uncertain' ? 'unknown'
+        : textSendError || outcomes.some(value => value !== 'sent') ? 'failed' : 'sent');
       const artifactDispatched = delivery.receipt?.artifacts?.some(
         ({ outcome }) => outcome === 'sent' || outcome === 'unknown',
       );
@@ -1700,6 +1838,7 @@ export class QqHarnessBridge {
         }
         batchSettled = true;
       }
+      qqTraceError(error);
       if (error?.code === 'turn-stopped') {
         try {
           stream?.cancel?.();
@@ -1851,6 +1990,7 @@ export class QqHarnessBridge {
   }
 
   async presentSessionSyncApproval(interaction, context, options = {}) {
+    this.#emptyMentions.cancel(context.key);
     return this.#approvals.handleSessionSyncRequested(interaction, context, {
       ...options, runtimeSignal: this.#signal, accessPolicy: this.#accessPolicy,
     });
@@ -1862,6 +2002,7 @@ export class QqHarnessBridge {
     target,
     requiresMention,
   }) {
+    if (['approval', 'question'].includes(interaction?.kind)) this.#emptyMentions.cancel(key);
     if (interaction?.kind === 'approval') {
       return this.#approvals.handleRequested(interaction, {
         key,

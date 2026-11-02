@@ -1,3 +1,4 @@
+import { qqEmptyMentionWaitSeconds } from '../../../../src/channels/qq/empty-mention-config.mjs';
 import { qqGroupParticipation } from '../../../../src/channels/qq/group-participation.mjs';
 import { qqPersona } from '../../../../src/channels/qq/persona.mjs';
 import { normalizeBusyMessageMode } from '../../../../src/channels/shared/message-mode.mjs';
@@ -16,6 +17,11 @@ export const QQ_RPC_CHANNEL = '/qq';
 
 export const QQ_ENDPOINTS = Object.freeze({
   status: 'connection.status',
+  setTrace: 'bot.trace.set',
+  setEmptyMention: 'bot.empty-mention.set',
+  listTraces: 'bot.trace.list',
+  traceDetail: 'bot.trace.detail',
+  exportTraces: 'bot.trace.export',
   beginProvisioning: 'provision.begin',
   pollProvisioning: 'provision.poll',
   cancelProvisioning: 'provision.cancel',
@@ -123,6 +129,9 @@ function normalizeBot(value) {
     participationStats: value.participationStats ?? null,
     groupReception: value.groupReception ?? [],
     gatewayTransport: value.gatewayTransport ?? null,
+    trace: value.trace ?? null,
+    emptyMentionWaitSeconds: qqEmptyMentionWaitSeconds(value.emptyMentionWaitSeconds),
+    emptyMention: value.emptyMention ?? null,
     persona: qqPersona(value.persona),
     familiarityEnabled: value.familiarityEnabled === true,
     familiarity: value.familiarity ?? null,

@@ -50,6 +50,7 @@ for (const channel of ['feishu', 'qq']) {
     class Harness { stopManagedProcess() {} }
     class Runtime { constructor(options) { runtimeOptions = options; } }
     class Controller {
+      clearEmptyMentions() {}
       constructor(options) { controllerOptions = options; }
       status() { return { bots: bots.map(({ botId }) => ({ botId, configured: true })) }; }
       async close() {}

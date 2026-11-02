@@ -1,3 +1,5 @@
+import { qqEmptyMentionWaitSeconds } from './empty-mention-config.mjs';
+import { QqMessageTraces } from './message-trace.mjs';
 import { qqGroupParticipation } from './group-participation.mjs';
 import { qqFamiliarityEnabled } from './familiarity.mjs';
 import { qqPersona } from './persona.mjs';
@@ -66,6 +68,7 @@ export class QqController {
   #logger;
   #diagnostics;
   #runtimes = new Map();
+  #traces = new Map();
   #errors = new Map();
   #attempts = new Map();
   #activeAttemptId = null;
@@ -243,6 +246,8 @@ export class QqController {
         // Rebinding credentials never silently resumes a paused account.
         ...(previousConfig?.paused === true ? { paused: true } : {}),
         ...(previousConfig?.groupParticipation === undefined ? {} : { groupParticipation: previousConfig.groupParticipation }),
+        ...(previousConfig?.emptyMentionWaitSeconds === undefined ? {} : { emptyMentionWaitSeconds: previousConfig.emptyMentionWaitSeconds }),
+        ...(previousConfig?.traceEnabled === true ? { traceEnabled: true } : {}),
         ...(previousConfig?.familiarityEnabled === true ? { familiarityEnabled: true } : {}),
         ...(previousConfig?.persona === undefined ? {} : { persona: previousConfig.persona }),
         ...(previousConfig?.stickersEnabled === true ? { stickersEnabled: true } : {}),
@@ -447,6 +452,39 @@ export class QqController {
     });
   }
 
+  clearEmptyMentions(botId) { this.#runtimes.get(botId)?.clearEmptyMentions(); }
+  async setEmptyMentionWaitSeconds(botId, value) {
+    const seconds = qqEmptyMentionWaitSeconds(value);
+    return this.#withBotTransition(botId, async () => {
+      const config = this.#configStore.get(botId); if (!config) throw new Error('Unknown QQ bot');
+      await this.#configStore.save({ ...config, emptyMentionWaitSeconds: seconds });
+      this.#runtimes.get(botId)?.setEmptyMentionWaitSeconds(seconds); this.#touch();
+      return this.status();
+    });
+  }
+
+  #tracesFor(botId) {
+    const config = this.#configStore.get(botId);
+    if (!config) throw new Error('Unknown QQ bot');
+    let store = this.#traces.get(botId);
+    if (!store) { store = new QqMessageTraces(); store.setEnabled(config.traceEnabled === true); this.#traces.set(botId, store); }
+    return store;
+  }
+  async setTraceEnabled(botId, enabled) {
+    if (typeof enabled !== 'boolean') throw new TypeError('Invalid trace enabled');
+    return this.#withBotTransition(botId, async () => {
+      const current = this.#configStore.get(botId);
+      if (!current) throw new Error('Unknown QQ bot');
+      const next = { ...current }; if (enabled) next.traceEnabled = true; else delete next.traceEnabled;
+      await this.#configStore.save(next);
+      this.#tracesFor(botId).setEnabled(enabled); this.#touch();
+      return this.status();
+    });
+  }
+  listTraces(botId, options) { return this.#tracesFor(botId).list(options); }
+  traceDetail(botId, id) { return this.#tracesFor(botId).detail(id); }
+  exportTraces(botId) { return this.#tracesFor(botId).export(); }
+
   async listFamiliarity(botId, options) {
     return this.#withBotTransition(botId, () => {
       if (!this.#configStore.get(botId)) throw new Error('Unknown QQ bot');
@@ -564,6 +602,7 @@ export class QqController {
       try {
         await atConnectionStage('credential.remove', () => this.#credentials.unset(config.secretRef), 'credential-store');
         await atConnectionStage('account.remove', () => this.#configStore.remove(botId), 'account-config');
+        this.#traces.delete(botId);
       } catch (error) {
         if (!this.#configStore.get(botId)) {
           warnings.push(this.#diagnostics.report(error, { operation: 'bot.delete', stage: 'workspace.cleanup', warning: true,
@@ -606,6 +645,9 @@ export class QqController {
         participationStats: runtimeStatus?.participationStats ?? null,
         groupReception: runtimeStatus?.groupReception ?? [],
         gatewayTransport: runtimeStatus?.gatewayTransport ?? null,
+        trace: this.#tracesFor(config.botId).status,
+        emptyMentionWaitSeconds: qqEmptyMentionWaitSeconds(config.emptyMentionWaitSeconds),
+        emptyMention: runtimeStatus?.emptyMention ?? null,
         persona: qqPersona(config.persona),
         familiarityEnabled: qqFamiliarityEnabled(config.familiarityEnabled),
         familiarity: runtimeStatus?.familiarity ?? null,
@@ -710,6 +752,8 @@ export class QqController {
       // A rescan keeps the existing pause decision; resuming stays explicit.
       ...(previousConfig?.paused === true ? { paused: true } : {}),
       ...(previousConfig?.groupParticipation === undefined ? {} : { groupParticipation: previousConfig.groupParticipation }),
+      ...(previousConfig?.emptyMentionWaitSeconds === undefined ? {} : { emptyMentionWaitSeconds: previousConfig.emptyMentionWaitSeconds }),
+      ...(previousConfig?.traceEnabled === true ? { traceEnabled: true } : {}),
       ...(previousConfig?.familiarityEnabled === true ? { familiarityEnabled: true } : {}),
         ...(previousConfig?.persona === undefined ? {} : { persona: previousConfig.persona }),
       ...(previousConfig?.stickersEnabled === true ? { stickersEnabled: true } : {}),
@@ -757,7 +801,7 @@ export class QqController {
     if (this.#closed) throw new Error('QQ controller is closed');
     await this.#stopRuntime(config.botId);
     if (this.#closed) throw new Error('QQ controller is closed');
-    const runtime = await atConnectionStage('runtime.prepare', () => this.#createRuntime({ botId: config.botId, config, appSecret }));
+    const runtime = await atConnectionStage('runtime.prepare', () => this.#createRuntime({ botId: config.botId, config, appSecret, traces: this.#tracesFor(config.botId) }));
     if (!runtime || typeof runtime.start !== 'function' || typeof runtime.stop !== 'function') {
       throw new TypeError('createRuntime returned an invalid QQ runtime');
     }

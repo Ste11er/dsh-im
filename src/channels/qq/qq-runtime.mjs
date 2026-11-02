@@ -1,3 +1,4 @@
+import { qqEmptyMentionWaitSeconds } from './empty-mention-config.mjs';
 import { QqGroupReception } from './group-reception.mjs';
 import { qqGroupParticipation } from './group-participation.mjs';
 import { qqFamiliarityEnabled } from './familiarity.mjs';
@@ -83,6 +84,8 @@ export class QqRuntime {
   #bot = null;
   #bridge = null;
   #groupReception = new QqGroupReception();
+  #traces;
+  #emptyMentionWaitSeconds;
   #abortController = null;
   #runTask = null;
   #starting = null;
@@ -99,6 +102,7 @@ export class QqRuntime {
     participationReply = null,
     groupMemory = null,
     familiarity = null,
+    traces = null,
     logger = console,
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 20_000,
@@ -108,7 +112,8 @@ export class QqRuntime {
     if (!config || !appSecret || !harness || !state) {
       throw new TypeError('QqRuntime requires config, app secret, Harness, and state');
     }
-    this.#config = config;
+    this.#config = config; this.#traces = traces;
+    this.#emptyMentionWaitSeconds = qqEmptyMentionWaitSeconds(config.emptyMentionWaitSeconds);
     this.#appSecret = appSecret;
     this.#harness = harness;
     this.#state = state;
@@ -140,7 +145,7 @@ export class QqRuntime {
 
   get status() {
     const memory = this.#groupMemory?.status ?? null;
-    return structuredClone({ ...this.#status, groupReception: this.#groupReception.status, familiarity: this.#familiarity?.status ?? null, participationStats: this.#bridge?.participationStats ?? null, groupMemory: memory
+    return structuredClone({ ...this.#status, emptyMention: this.#bridge?.emptyMentionStatus ?? null, groupReception: this.#groupReception.status, familiarity: this.#familiarity?.status ?? null, participationStats: this.#bridge?.participationStats ?? null, groupMemory: memory
       ? { ...memory, lastError: this.#status.groupMemoryError ?? memory.lastError } : null });
   }
 
@@ -182,6 +187,12 @@ export class QqRuntime {
    * method below stays ungated on purpose: approval prompts reuse it as their
    * L2 send path.
    */
+  setEmptyMentionWaitSeconds(value) {
+    this.#emptyMentionWaitSeconds = qqEmptyMentionWaitSeconds(value);
+    this.#bridge?.setEmptyMentionWaitMs(value * 1000);
+  }
+  clearEmptyMentions() { this.#bridge?.clearEmptyMentions(); }
+
   setPaused(value) {
     const paused = value === true;
     this.#paused = paused;
@@ -409,6 +420,7 @@ export class QqRuntime {
         this.#status.gatewayTransport = health;
         this.#status.lastCheckedAt = Date.now();
         if (health.state !== 'connected') {
+          this.clearEmptyMentions();
           this.#status.ready = false;
           this.#status.qqConnectionState = health.state === 'failed' ? 'failed' : 'connecting';
           this.#status.lastError = health.state === 'failed' ? 'QQ 网关连接失败，等待连接管理器重试。'
@@ -433,6 +445,8 @@ export class QqRuntime {
     catch (error) { this.#logger.error?.('[dsh-im:qq] familiarity initialization failed:', error); }
     this.#bridge = new QqHarnessBridge({
       bot,
+      traces: this.#traces,
+      emptyMentionWaitMs: this.#emptyMentionWaitSeconds * 1000,
       onGroupDecision: (groupId, stage) => this.#groupReception.decision(groupId, stage),
       ownerUserOpenid: this.#config.ownerUserOpenid,
       computerCommandOwners: this.#config.computerCommandOwners,

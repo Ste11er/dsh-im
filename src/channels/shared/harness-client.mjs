@@ -1744,6 +1744,7 @@ export class HarnessClient {
     const tracker = new HarnessReplyTracker({
       promptRpcId, afterSeq: baselineSeq, reasoning, finalAnswerOnly: options.finalAnswerOnly,
     });
+    let reportedTurn = null;
     let checkedBlockedSeq = baselineSeq;
     let lastProgressAt = Date.now();
     let lastPollSeq = tracker.lastSeq;
@@ -1753,6 +1754,12 @@ export class HarnessClient {
         live: progressMode === 'live',
         fromMux,
       });
+      // Optional metadata observer; the tracker has already correlated this
+      // turn with this prompt. Do not infer ownership from the latest Session.
+      if (tracker.turn !== null && tracker.turn !== reportedTurn && typeof options.onTurn === 'function') {
+        reportedTurn = tracker.turn;
+        options.onTurn({ sessionId, turn: tracker.turn });
+      }
       const seqAdvanced = tracker.lastSeq > lastPollSeq;
       lastPollSeq = tracker.lastSeq;
       if (seqAdvanced) lastProgressAt = Date.now();

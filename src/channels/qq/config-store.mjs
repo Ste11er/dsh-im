@@ -1,3 +1,4 @@
+import { qqEmptyMentionWaitSeconds } from './empty-mention-config.mjs';
 import { qqGroupParticipation } from './group-participation.mjs';
 import { qqComputerCommandOwners } from './computer-command-owner.mjs';
 import { qqFamiliarityEnabled } from './familiarity.mjs';
@@ -53,6 +54,7 @@ function normalizeBot(value) {
   if (!appId || !ownerUserOpenid || !botId || !secretRef) return null;
   const derived = deriveQqBotIdentity(appId);
   if (derived.botId !== botId || derived.secretRef !== secretRef) return null;
+  if (value.traceEnabled !== undefined && typeof value.traceEnabled !== 'boolean') throw new TypeError('Invalid traceEnabled');
   const memoryModels = qqGroupMemoryModels(value.groupMemoryModels);
   return Object.freeze({
     botId,
@@ -67,6 +69,8 @@ function normalizeBot(value) {
     // exact document shape they had before this feature existed.
     ...(value.paused === true ? { paused: true } : {}),
     ...(value.groupParticipation === undefined ? {} : { groupParticipation: qqGroupParticipation(value.groupParticipation) }),
+    ...(value.emptyMentionWaitSeconds === undefined ? {} : { emptyMentionWaitSeconds: qqEmptyMentionWaitSeconds(value.emptyMentionWaitSeconds) }),
+    ...(value.traceEnabled === true ? { traceEnabled: true } : {}),
     ...(qqFamiliarityEnabled(value.familiarityEnabled) ? { familiarityEnabled: true } : {}),
     ...(value.persona === undefined ? {} : { persona: qqPersona(value.persona) }),
     ...(qqStickersEnabled(value.stickersEnabled) ? { stickersEnabled: true } : {}),
